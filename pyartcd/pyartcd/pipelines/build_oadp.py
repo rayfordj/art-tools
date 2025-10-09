@@ -19,6 +19,12 @@ from pyartcd.util import default_release_suffix
 class BuildOadpPipeline:
     """Rebase and build OADP for an assembly"""
 
+    GROUP_NAMESPACE_MAP = {
+        "oadp-": "art-oadp-tenant",
+        "mta-": "art-mta-tenant",
+        "mtc-": "art-mtc-tenant",
+    }
+
     def __init__(
         self,
         runtime: Runtime,
@@ -140,6 +146,11 @@ class BuildOadpPipeline:
             "--build-priority=1",
         ]
 
+        for prefix, namespace in self.GROUP_NAMESPACE_MAP.items():
+            if self.group.startswith(prefix):
+                build_cmd.append(f"--konflux-namespace={namespace}")
+                break
+
         # Use kubeconfig from CLI parameter or environment variable
         kubeconfig = self.kubeconfig or os.environ.get('KONFLUX_SA_KUBECONFIG')
         if not kubeconfig:
@@ -151,8 +162,6 @@ class BuildOadpPipeline:
             [
                 "--konflux-kubeconfig",
                 kubeconfig,
-                "--konflux-namespace",
-                "ocp-art-tenant",
             ]
         )
         if self.runtime.dry_run:
