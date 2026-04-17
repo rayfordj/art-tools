@@ -893,6 +893,79 @@ class TestRpmInfoCollectorFetchRpms(unittest.TestCase):
         self.assertEqual(len(result), 1)
         self.assertIn("5.32.1", result[0].evr)
 
+    def test_fetch_rpms_filters_incompatible_module_contexts(self):
+        """RPMs from an incompatible context of an enabled stream are excluded;
+        the resolver picks the NEVRA from the context matching enabled deps."""
+        arches = ['x86_64']
+        repo_data = {
+            "rhel-8-appstream-rpms": {
+                "conf": {"baseurl": {"x86_64": "https://example.com/appstream/"}},
+                "content_set": {"default": "appstream-cs"},
+                "reposync": {"enabled": False},
+            },
+        }
+        repos = Repos(repo_data, arches=arches)
+        collector = RpmInfoCollector(repos=repos)
+        collector.logger = MagicMock()
+
+        net_ssleay_524 = Rpm(
+            name="perl-Net-SSLeay",
+            epoch=0,
+            version="1.88",
+            release="2.module+el8.6.0+13392+30f09725",
+            arch="x86_64",
+            checksum="a",
+            size=1,
+            location="/net_ssleay_524.rpm",
+            sourcerpm="perl-Net-SSLeay.src.rpm",
+        )
+        net_ssleay_526 = Rpm(
+            name="perl-Net-SSLeay",
+            epoch=0,
+            version="1.88",
+            release="2.module+el8.9.0+19876+abcdef12",
+            arch="x86_64",
+            checksum="b",
+            size=2,
+            location="/net_ssleay_526.rpm",
+            sourcerpm="perl-Net-SSLeay.src.rpm",
+        )
+
+        ctx_524 = RpmModule(
+            "perl-IO-Socket-SSL",
+            "2.066",
+            100,
+            "ctx_524",
+            "x86_64",
+            rpms={net_ssleay_524.nevra},
+            requires={"perl": ["5.24"], "platform": ["el8"]},
+        )
+        ctx_526 = RpmModule(
+            "perl-IO-Socket-SSL",
+            "2.066",
+            200,
+            "ctx_526",
+            "x86_64",
+            rpms={net_ssleay_526.nevra},
+            requires={"perl": ["5.26"], "platform": ["el8"]},
+        )
+
+        repodata = Repodata(
+            name="rhel-8-appstream-rpms-x86_64",
+            primary_rpms=[net_ssleay_524, net_ssleay_526],
+            modules=[ctx_524, ctx_526],
+        )
+        collector.loaded_repos["rhel-8-appstream-rpms-x86_64"] = repodata
+
+        result = collector._fetch_rpms_info_per_arch(
+            {"perl-Net-SSLeay"},
+            {"rhel-8-appstream-rpms"},
+            "x86_64",
+            enabled_module_streams={"perl": "5.26", "perl-IO-Socket-SSL": "2.066"},
+        )
+        self.assertEqual(len(result), 1)
+        self.assertIn("el8.9.0+19876+abcdef12", result[0].evr)
+
     def test_build_blocked_nevras(self):
         """_build_blocked_nevras blocks only non-enabled streams of managed modules."""
         perl_526_nevra = "perl-interpreter-0:5.26.3-1.el8.x86_64"
@@ -914,6 +987,64 @@ class TestRpmInfoCollectorFetchRpms(unittest.TestCase):
         self.assertIn(perl_532_nevra, blocked)
         self.assertNotIn(perl_526_nevra, blocked)
         self.assertNotIn(nodejs_nevra, blocked)
+
+    def test_build_blocked_nevras_filters_incompatible_contexts(self):
+        """_build_blocked_nevras blocks RPMs from contexts of an enabled stream
+        whose runtime requires conflict with other enabled streams."""
+        net_ssleay_524 = "perl-Net-SSLeay-0:1.88-2.module+el8.6.0+13392+30f09725.x86_64"
+        net_ssleay_526 = "perl-Net-SSLeay-0:1.88-2.module+el8.9.0+19876+abcdef12.x86_64"
+
+        repodata = Repodata(
+            name="test-repo",
+            primary_rpms=[],
+            modules=[
+                RpmModule(
+                    "perl-IO-Socket-SSL",
+                    "2.066",
+                    100,
+                    "ctx_524",
+                    "x86_64",
+                    rpms={net_ssleay_524},
+                    requires={"perl": ["5.24"], "platform": ["el8"]},
+                ),
+                RpmModule(
+                    "perl-IO-Socket-SSL",
+                    "2.066",
+                    200,
+                    "ctx_526",
+                    "x86_64",
+                    rpms={net_ssleay_526},
+                    requires={"perl": ["5.26"], "platform": ["el8"]},
+                ),
+            ],
+        )
+
+        blocked = RpmInfoCollector._build_blocked_nevras(
+            repodata,
+            {"perl": "5.26", "perl-IO-Socket-SSL": "2.066"},
+            "x86_64",
+        )
+
+        self.assertIn(net_ssleay_524, blocked)
+        self.assertNotIn(net_ssleay_526, blocked)
+
+    def test_build_blocked_nevras_allows_context_without_requires(self):
+        """Contexts with no requires metadata are not blocked (backwards compat)."""
+        some_nevra = "some-pkg-0:1.0-1.el8.x86_64"
+        repodata = Repodata(
+            name="test-repo",
+            primary_rpms=[],
+            modules=[
+                RpmModule("mymod", "1.0", 100, "ctx1", "x86_64", rpms={some_nevra}, requires={}),
+            ],
+        )
+
+        blocked = RpmInfoCollector._build_blocked_nevras(
+            repodata,
+            {"mymod": "1.0"},
+            "x86_64",
+        )
+        self.assertNotIn(some_nevra, blocked)
 
     def test_parse_module_specs(self):
         specs = {"perl:5.26", "perl-IO-Socket-SSL:2.066", "perl-libwww-perl:6.34"}

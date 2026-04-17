@@ -140,6 +140,7 @@ class RpmModule:
     context: str
     arch: str
     rpms: Set[str] = field(default_factory=set)
+    requires: Dict[str, List[str]] = field(default_factory=dict)
 
     @property
     def name_stream(self):
@@ -160,6 +161,11 @@ class RpmModule:
     @staticmethod
     def from_metadata(metadata: Dict[str, Any]):
         rpms = metadata["data"].get("artifacts", {}).get("rpms", [])
+        requires: Dict[str, List[str]] = {}
+        for dep in metadata["data"].get("dependencies", []):
+            for mod_name, streams in dep.get("requires", {}).items():
+                if streams:
+                    requires[mod_name] = [str(s) for s in streams]
         return RpmModule(
             name=metadata["data"]["name"],
             stream=str(metadata["data"]["stream"]),
@@ -167,6 +173,7 @@ class RpmModule:
             context=metadata["data"]["context"],
             arch=metadata["data"]["arch"],
             rpms=set(rpms),
+            requires=requires,
         )
 
 

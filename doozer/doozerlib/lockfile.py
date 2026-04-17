@@ -275,11 +275,18 @@ class RpmInfoCollector:
     @staticmethod
     def _build_blocked_nevras(repodata: 'Repodata', enabled_module_streams: dict[str, str], arch: str) -> set[str]:
         """
-        Build set of NEVRAs that belong to non-enabled streams of managed modules.
+        Build set of NEVRAs that belong to non-enabled or incompatible module contexts.
 
-        Only modules whose name appears in ``enabled_module_streams`` are filtered;
-        RPMs from unrelated modules pass through (matching DNF behaviour where
-        unmentioned modules are not subject to stream filtering).
+        For each module whose name appears in ``enabled_module_streams``:
+        - If the stream does not match, all its RPMs are blocked.
+        - If the stream matches but the context's runtime ``requires`` conflict
+          with another enabled stream, the RPMs are blocked too.  This handles
+          RHEL 8 modules where a single stream (e.g. ``perl-IO-Socket-SSL:2.066``)
+          ships multiple contexts built against different dependency streams
+          (e.g. ``perl:5.24`` vs ``perl:5.26``).
+
+        RPMs from unrelated modules (not listed in ``enabled_module_streams``)
+        pass through, matching DNF behaviour.
 
         Args:
             repodata: Repository metadata containing module information.
@@ -294,8 +301,16 @@ class RpmInfoCollector:
         for module in repodata.modules:
             if module.arch != arch and module.arch != "noarch":
                 continue
-            if module.name in enabled_module_streams and module.stream != enabled_module_streams[module.name]:
+            if module.name not in enabled_module_streams:
+                continue
+            if module.stream != enabled_module_streams[module.name]:
                 blocked.update(module.rpms)
+            elif module.requires:
+                for req_name, req_streams in module.requires.items():
+                    if req_name in enabled_module_streams:
+                        if enabled_module_streams[req_name] not in req_streams:
+                            blocked.update(module.rpms)
+                            break
         return blocked
 
     def _fetch_rpms_info_per_arch(
