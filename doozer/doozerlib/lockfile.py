@@ -272,7 +272,39 @@ class RpmInfoCollector:
         self.loaded_repos.update({r.name: r for r in repodatas})
         self.logger.info(f"Finished loading repos: {', '.join(repos_to_fetch)} for arch {arch}")
 
-    def _fetch_rpms_info_per_arch(self, rpm_names: set[str], repo_names: set[str], arch: str) -> list[RpmInfo]:
+    @staticmethod
+    def _build_blocked_nevras(repodata: 'Repodata', enabled_module_streams: dict[str, str], arch: str) -> set[str]:
+        """
+        Build set of NEVRAs that belong to non-enabled streams of managed modules.
+
+        Only modules whose name appears in ``enabled_module_streams`` are filtered;
+        RPMs from unrelated modules pass through (matching DNF behaviour where
+        unmentioned modules are not subject to stream filtering).
+
+        Args:
+            repodata: Repository metadata containing module information.
+            enabled_module_streams: Mapping of module name to enabled stream
+                (e.g. ``{"perl": "5.26", "perl-IO-Socket-SSL": "2.066"}``).
+            arch: Target architecture.
+
+        Returns:
+            Set of NEVRAs to exclude from resolution.
+        """
+        blocked: set[str] = set()
+        for module in repodata.modules:
+            if module.arch != arch and module.arch != "noarch":
+                continue
+            if module.name in enabled_module_streams and module.stream != enabled_module_streams[module.name]:
+                blocked.update(module.rpms)
+        return blocked
+
+    def _fetch_rpms_info_per_arch(
+        self,
+        rpm_names: set[str],
+        repo_names: set[str],
+        arch: str,
+        enabled_module_streams: Optional[dict[str, str]] = None,
+    ) -> list[RpmInfo]:
         """
         Resolve RPM metadata for a specific architecture from the given repodata names.
 
@@ -284,10 +316,15 @@ class RpmInfoCollector:
         ``sort_repos_for_lockfile_resolution`` acts as tiebreaker (RHEL upstream repos
         are preferred over rhocp plashets).
 
+        When ``enabled_module_streams`` is provided, RPMs from non-enabled streams of
+        managed modules are excluded before version selection so the resolver picks the
+        correct stream's latest version.
+
         Args:
             rpm_names (set[str]): RPM names or NVRs to resolve.
             repo_names (set[str]): Names of repodata sources to search.
             arch (str): Target architecture.
+            enabled_module_streams: Optional mapping of module name to enabled stream.
 
         Returns:
             list[RpmInfo]: Resolved RPM package metadata.
@@ -315,7 +352,10 @@ class RpmInfoCollector:
                 self.logger.error(f'repo {repo_name} not found')
                 continue
 
-            found_rpms, not_found = repodata.get_rpms(rpm_names, arch)
+            blocked_nevras = (
+                self._build_blocked_nevras(repodata, enabled_module_streams, arch) if enabled_module_streams else None
+            )
+            found_rpms, not_found = repodata.get_rpms(rpm_names, arch, blocked_nevras=blocked_nevras)
             resolved_items |= rpm_names - set(not_found)
 
             content_set_id = repo.content_set(arch)
@@ -349,9 +389,28 @@ class RpmInfoCollector:
 
         return sorted(results.values())
 
+    @staticmethod
+    def _parse_module_specs(module_specs: Optional[set[str]]) -> Optional[dict[str, str]]:
+        """Parse module specs like ``{"perl:5.26", "nodejs:18"}`` into ``{"perl": "5.26", "nodejs": "18"}``.
+
+        Returns None when there are no module specs so callers can skip filtering entirely.
+        """
+        if not module_specs:
+            return None
+        streams: dict[str, str] = {}
+        for spec in module_specs:
+            name, _, stream = spec.partition(":")
+            if stream:
+                streams[name] = stream
+        return streams or None
+
     @start_as_current_span_async(TRACER, "lockfile.fetch_rpms_info")
     async def fetch_rpms_info(
-        self, arches: list[str], repositories: set[str], rpm_names: set[str]
+        self,
+        arches: list[str],
+        repositories: set[str],
+        rpm_names: set[str],
+        module_specs: Optional[set[str]] = None,
     ) -> dict[str, list[RpmInfo]]:
         """
         Resolve RPM info across multiple architectures and repositories.
@@ -362,6 +421,9 @@ class RpmInfoCollector:
             arches (list[str]): Target architectures.
             repositories (set[str]): Names of repositories to search.
             rpm_names (set[str]): Names or NVRs of RPMs to resolve.
+            module_specs: Optional set of enabled module specs (e.g. ``{"perl:5.26"}``).
+                When provided, RPMs from non-enabled streams are excluded before version
+                selection so the resolver picks versions compatible with the enabled streams.
 
         Returns:
             dict[str, list[RpmInfo]]: Mapping of architecture to resolved RPM metadata.
@@ -372,10 +434,17 @@ class RpmInfoCollector:
         current_span.set_attribute("lockfile.rpm_count", len(rpm_names))
         current_span.set_attribute("lockfile.arch_count", len(arches))
 
+        enabled_module_streams = self._parse_module_specs(module_specs)
+
         results = await asyncio.gather(
             *[
                 asyncio.get_running_loop().run_in_executor(
-                    None, self._fetch_rpms_info_per_arch, rpm_names, repositories, arch
+                    None,
+                    self._fetch_rpms_info_per_arch,
+                    rpm_names,
+                    repositories,
+                    arch,
+                    enabled_module_streams,
                 )
                 for arch in arches
             ]
@@ -715,7 +784,7 @@ class RPMLockfileGenerator:
         modules_to_install = image_meta.get_lockfile_modules_to_install()
 
         rpms_info_by_arch, modules_info_by_arch = await asyncio.gather(
-            self.builder.fetch_rpms_info(arches, enabled_repos, rpms_to_install),
+            self.builder.fetch_rpms_info(arches, enabled_repos, rpms_to_install, module_specs=modules_to_install),
             self.builder.fetch_modules_info(arches, enabled_repos, modules_to_install),
         )
 

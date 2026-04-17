@@ -12,7 +12,7 @@ from doozerlib.lockfile import (
     RPMLockfileGenerator,
     sort_repos_for_lockfile_resolution,
 )
-from doozerlib.repodata import Rpm, RpmModule
+from doozerlib.repodata import Repodata, Rpm, RpmModule
 from doozerlib.repos import Repos
 
 
@@ -727,6 +727,209 @@ class TestRpmInfoCollectorFetchRpms(unittest.TestCase):
                 "Repos already loaded, skipping: rhel-9-baseos-rpms for arch x86_64"
             )
             self.collector.logger.info.assert_any_call("Finished loading repos: rhel-9-appstream-rpms for arch x86_64")
+
+    def test_fetch_rpms_filters_non_enabled_module_streams(self):
+        """RPMs from a non-enabled stream of a managed module are excluded;
+        RPMs from unrelated modules and non-modular RPMs pass through."""
+        arches = ['x86_64']
+        repo_data = {
+            "rhel-8-appstream-rpms": {
+                "conf": {"baseurl": {"x86_64": "https://example.com/appstream/"}},
+                "content_set": {"default": "appstream-cs"},
+                "reposync": {"enabled": False},
+            },
+        }
+        repos = Repos(repo_data, arches=arches)
+        collector = RpmInfoCollector(repos=repos)
+        collector.logger = MagicMock()
+
+        perl_526 = Rpm(
+            name="perl-interpreter",
+            epoch=4,
+            version="5.26.3",
+            release="423.el8_10",
+            arch="x86_64",
+            checksum="a",
+            size=1,
+            location="/perl526.rpm",
+            sourcerpm="perl.src.rpm",
+        )
+        perl_532 = Rpm(
+            name="perl-interpreter",
+            epoch=4,
+            version="5.32.1",
+            release="474.module.el8",
+            arch="x86_64",
+            checksum="b",
+            size=2,
+            location="/perl532.rpm",
+            sourcerpm="perl.src.rpm",
+        )
+        nodejs_rpm = Rpm(
+            name="nodejs",
+            epoch=1,
+            version="18.0.0",
+            release="1.module.el8",
+            arch="x86_64",
+            checksum="c",
+            size=3,
+            location="/nodejs.rpm",
+            sourcerpm="nodejs.src.rpm",
+        )
+        doxygen_rpm = Rpm(
+            name="doxygen",
+            epoch=1,
+            version="1.8.14",
+            release="14.el8_10",
+            arch="x86_64",
+            checksum="d",
+            size=4,
+            location="/doxygen.rpm",
+            sourcerpm="doxygen.src.rpm",
+        )
+
+        perl_526_module = RpmModule(
+            "perl",
+            "5.26",
+            100,
+            "ctx1",
+            "x86_64",
+            rpms={perl_526.nevra},
+        )
+        perl_532_module = RpmModule(
+            "perl",
+            "5.32",
+            200,
+            "ctx2",
+            "x86_64",
+            rpms={perl_532.nevra},
+        )
+        nodejs_module = RpmModule(
+            "nodejs",
+            "18",
+            300,
+            "ctx3",
+            "x86_64",
+            rpms={nodejs_rpm.nevra},
+        )
+
+        repodata = Repodata(
+            name="rhel-8-appstream-rpms-x86_64",
+            primary_rpms=[perl_526, perl_532, nodejs_rpm, doxygen_rpm],
+            modules=[perl_526_module, perl_532_module, nodejs_module],
+        )
+        collector.loaded_repos["rhel-8-appstream-rpms-x86_64"] = repodata
+
+        result = collector._fetch_rpms_info_per_arch(
+            {"perl-interpreter", "nodejs", "doxygen"},
+            {"rhel-8-appstream-rpms"},
+            "x86_64",
+            enabled_module_streams={"perl": "5.26"},
+        )
+        result_by_name = {r.name: r for r in result}
+
+        # perl-interpreter should resolve to 5.26 (5.32 is blocked)
+        self.assertIn("perl-interpreter", result_by_name)
+        self.assertIn("5.26.3", result_by_name["perl-interpreter"].evr)
+
+        # nodejs is from an unrelated module — not filtered
+        self.assertIn("nodejs", result_by_name)
+
+        # doxygen is non-modular — not filtered
+        self.assertIn("doxygen", result_by_name)
+
+    def test_fetch_rpms_no_module_filter_picks_highest(self):
+        """Without module specs, the highest EVR wins even if it's from a non-default stream."""
+        arches = ['x86_64']
+        repo_data = {
+            "rhel-8-appstream-rpms": {
+                "conf": {"baseurl": {"x86_64": "https://example.com/appstream/"}},
+                "content_set": {"default": "appstream-cs"},
+                "reposync": {"enabled": False},
+            },
+        }
+        repos = Repos(repo_data, arches=arches)
+        collector = RpmInfoCollector(repos=repos)
+        collector.logger = MagicMock()
+
+        perl_526 = Rpm(
+            name="perl-interpreter",
+            epoch=4,
+            version="5.26.3",
+            release="423.el8",
+            arch="x86_64",
+            checksum="a",
+            size=1,
+            location="/perl526.rpm",
+            sourcerpm="perl.src.rpm",
+        )
+        perl_532 = Rpm(
+            name="perl-interpreter",
+            epoch=4,
+            version="5.32.1",
+            release="474.module.el8",
+            arch="x86_64",
+            checksum="b",
+            size=2,
+            location="/perl532.rpm",
+            sourcerpm="perl.src.rpm",
+        )
+
+        repodata = Repodata(
+            name="rhel-8-appstream-rpms-x86_64",
+            primary_rpms=[perl_526, perl_532],
+            modules=[
+                RpmModule("perl", "5.26", 100, "ctx1", "x86_64", rpms={perl_526.nevra}),
+                RpmModule("perl", "5.32", 200, "ctx2", "x86_64", rpms={perl_532.nevra}),
+            ],
+        )
+        collector.loaded_repos["rhel-8-appstream-rpms-x86_64"] = repodata
+
+        result = collector._fetch_rpms_info_per_arch(
+            {"perl-interpreter"},
+            {"rhel-8-appstream-rpms"},
+            "x86_64",
+        )
+        self.assertEqual(len(result), 1)
+        self.assertIn("5.32.1", result[0].evr)
+
+    def test_build_blocked_nevras(self):
+        """_build_blocked_nevras blocks only non-enabled streams of managed modules."""
+        perl_526_nevra = "perl-interpreter-0:5.26.3-1.el8.x86_64"
+        perl_532_nevra = "perl-interpreter-0:5.32.1-1.el8.x86_64"
+        nodejs_nevra = "nodejs-1:18.0.0-1.el8.x86_64"
+
+        repodata = Repodata(
+            name="test-repo",
+            primary_rpms=[],
+            modules=[
+                RpmModule("perl", "5.26", 100, "ctx1", "x86_64", rpms={perl_526_nevra}),
+                RpmModule("perl", "5.32", 200, "ctx2", "x86_64", rpms={perl_532_nevra}),
+                RpmModule("nodejs", "18", 300, "ctx3", "x86_64", rpms={nodejs_nevra}),
+            ],
+        )
+
+        blocked = RpmInfoCollector._build_blocked_nevras(repodata, {"perl": "5.26"}, "x86_64")
+
+        self.assertIn(perl_532_nevra, blocked)
+        self.assertNotIn(perl_526_nevra, blocked)
+        self.assertNotIn(nodejs_nevra, blocked)
+
+    def test_parse_module_specs(self):
+        specs = {"perl:5.26", "perl-IO-Socket-SSL:2.066", "perl-libwww-perl:6.34"}
+        result = RpmInfoCollector._parse_module_specs(specs)
+        self.assertEqual(
+            result,
+            {
+                "perl": "5.26",
+                "perl-IO-Socket-SSL": "2.066",
+                "perl-libwww-perl": "6.34",
+            },
+        )
+
+    def test_parse_module_specs_none(self):
+        self.assertIsNone(RpmInfoCollector._parse_module_specs(None))
+        self.assertIsNone(RpmInfoCollector._parse_module_specs(set()))
 
     def test_fetch_modules_info_empty_modules(self):
         """Test graceful handling when no modules are requested"""

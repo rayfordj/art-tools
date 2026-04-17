@@ -179,7 +179,12 @@ class Repodata:
     modules_size: Optional[int] = None
     modules_url: Optional[str] = None
 
-    def get_rpms(self, items: Union[str, Iterable[str]], arch: str) -> Tuple[list[Rpm], list[str]]:
+    def get_rpms(
+        self,
+        items: Union[str, Iterable[str]],
+        arch: str,
+        blocked_nevras: Optional[set] = None,
+    ) -> Tuple[list[Rpm], list[str]]:
         """
         Retrieve RPM packages based on names or NVRs with intelligent version filtering.
 
@@ -189,6 +194,9 @@ class Repodata:
         Args:
             items: Package names (e.g., "wget") or NVRs (e.g., "nettle-3.9.1-1.el9") to resolve
             arch: Target architecture (results include both arch-specific and noarch packages)
+            blocked_nevras: Optional set of NEVRAs to exclude (e.g. RPMs from non-enabled module
+                streams). Filtering happens before version selection so the correct stream's
+                latest version is picked.
 
         Returns:
             Tuple of (found_rpms, not_found_items) where found_rpms contains resolved packages
@@ -208,6 +216,8 @@ class Repodata:
             matching_rpms = [
                 rpm for rpm in self.primary_rpms if rpm.name == rpm_name and (rpm.arch == arch or rpm.arch == 'noarch')
             ]
+            if blocked_nevras:
+                matching_rpms = [rpm for rpm in matching_rpms if rpm.nevra not in blocked_nevras]
 
             if not matching_rpms:
                 not_found.append(item)
