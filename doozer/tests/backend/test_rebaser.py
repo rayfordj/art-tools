@@ -594,7 +594,6 @@ USER 3000
         rebaser._logger.info.assert_called_once_with("DNF module enablement disabled for test-image")
 
         # Should not call other metadata methods since we returned early
-        mock_metadata.branch_el_target.assert_not_called()
         mock_metadata.get_lockfile_modules_to_install.assert_not_called()
 
     def test_get_module_enablement_commands_enabled_by_config(self):
@@ -609,7 +608,6 @@ USER 3000
         mock_metadata.distgit_key = "test-image"
         mock_metadata.is_lockfile_generation_enabled.return_value = True
         mock_metadata.is_dnf_modules_enable_enabled.return_value = True
-        mock_metadata.branch_el_target.return_value = 9  # RHEL 9
         mock_metadata.get_lockfile_modules_to_install.return_value = {"postgresql:15", "maven:3.8"}
 
         result = rebaser._get_module_enablement_commands(mock_metadata)
@@ -628,7 +626,6 @@ USER 3000
 
         # Should have called all metadata methods
         mock_metadata.is_dnf_modules_enable_enabled.assert_called_once()
-        mock_metadata.branch_el_target.assert_called_once()
         mock_metadata.get_lockfile_modules_to_install.assert_called_once()
 
     def test_get_module_enablement_commands_with_existing_user_zero(self):
@@ -642,7 +639,6 @@ USER 3000
         mock_metadata.distgit_key = "test-image"
         mock_metadata.is_lockfile_generation_enabled.return_value = True
         mock_metadata.is_dnf_modules_enable_enabled.return_value = True
-        mock_metadata.branch_el_target.return_value = 9
         mock_metadata.get_lockfile_modules_to_install.return_value = {"postgresql:15"}
 
         # Previous lines contain USER 0
@@ -665,7 +661,6 @@ USER 3000
         mock_metadata.distgit_key = "test-image"
         mock_metadata.is_lockfile_generation_enabled.return_value = True
         mock_metadata.is_dnf_modules_enable_enabled.return_value = True
-        mock_metadata.branch_el_target.return_value = 9
         mock_metadata.get_lockfile_modules_to_install.return_value = {"postgresql:15"}
 
         # Previous lines contain different USER
@@ -688,7 +683,6 @@ USER 3000
         mock_metadata.distgit_key = "test-image"
         mock_metadata.is_lockfile_generation_enabled.return_value = True
         mock_metadata.is_dnf_modules_enable_enabled.return_value = True
-        mock_metadata.branch_el_target.return_value = 9
         mock_metadata.get_lockfile_modules_to_install.return_value = {"postgresql:15"}
 
         # Previous lines contain USER 0 then USER 1001 (most recent)
@@ -711,7 +705,6 @@ USER 3000
         mock_metadata.distgit_key = "test-image"
         mock_metadata.is_lockfile_generation_enabled.return_value = True
         mock_metadata.is_dnf_modules_enable_enabled.return_value = True
-        mock_metadata.branch_el_target.return_value = 9
         mock_metadata.get_lockfile_modules_to_install.return_value = {"postgresql:15"}
 
         # No previous lines provided (None)
@@ -733,7 +726,6 @@ USER 3000
         mock_metadata.distgit_key = "test-image"
         mock_metadata.is_lockfile_generation_enabled.return_value = True
         mock_metadata.is_dnf_modules_enable_enabled.return_value = True
-        mock_metadata.branch_el_target.return_value = 9
         mock_metadata.get_lockfile_modules_to_install.return_value = {"postgresql:15"}
 
         # Empty previous lines list

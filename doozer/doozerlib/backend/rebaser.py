@@ -1237,7 +1237,7 @@ class KonfluxRebaser:
 
     def _get_module_enablement_commands(self, metadata: ImageMetadata, previous_lines: List[str] = None) -> List[str]:
         """
-        Generate DNF module enable commands for RHEL 9+ images with lockfile modules.
+        Generate DNF module enable commands for images with lockfile modules.
 
         Args:
             metadata: ImageMetadata for the image being processed
@@ -1252,13 +1252,6 @@ class KonfluxRebaser:
         # Check if DNF module enablement is disabled
         if not metadata.is_dnf_modules_enable_enabled():
             self._logger.info(f"DNF module enablement disabled for {metadata.distgit_key}")
-            return []
-
-        try:
-            el_ver = metadata.branch_el_target()
-            if el_ver < 9:
-                return []
-        except ValueError:
             return []
 
         modules_to_install = metadata.get_lockfile_modules_to_install()
