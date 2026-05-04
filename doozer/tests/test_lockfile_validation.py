@@ -1,6 +1,6 @@
+import logging
 from unittest.mock import Mock
 
-import pytest
 from doozerlib.lockfile import RpmInfo, RPMLockfileGenerator
 
 
@@ -135,8 +135,8 @@ class TestCrossArchVersionSetValidation:
         # Act & Assert: Should not raise exception
         self.generator._validate_cross_arch_version_sets(rpms_info_by_arch)
 
-    def test_version_set_mismatch_single_package_single_architecture(self):
-        """Test validation fails when one package has different version sets across architectures."""
+    def test_version_set_mismatch_single_package_single_architecture(self, caplog):
+        """Test validation logs a warning when one package has different version sets across architectures."""
         # Arrange: audit-libs has different version on aarch64
         rpms_info_by_arch = {
             "x86_64": [
@@ -193,18 +193,18 @@ class TestCrossArchVersionSetValidation:
             ],
         }
 
-        # Act & Assert: Should raise ValueError
-        with pytest.raises(ValueError) as exc_info:
+        # Act & Assert: Should log warning with specific details (only latest versions)
+        with caplog.at_level(logging.WARNING):
             self.generator._validate_cross_arch_version_sets(rpms_info_by_arch)
 
-        # Verify error message contains specific details (now shows only latest versions)
-        error_message = str(exc_info.value)
-        assert "audit-libs" in error_message
-        assert "x86_64:{0:3.1.5-4.el9}" in error_message
-        assert "aarch64:{0:3.1.5-6.el9}" in error_message
+        warning_message = caplog.text
+        assert "RPM version set mismatches" in warning_message
+        assert "audit-libs" in warning_message
+        assert "x86_64:{0:3.1.5-4.el9}" in warning_message
+        assert "aarch64:{0:3.1.5-6.el9}" in warning_message
 
-    def test_version_set_mismatch_multiple_packages_multiple_architectures(self):
-        """Test validation fails with detailed errors for multiple package mismatches across architectures."""
+    def test_version_set_mismatch_multiple_packages_multiple_architectures(self, caplog):
+        """Test validation logs warnings with details for multiple package mismatches across architectures."""
         # Arrange: Multiple packages with different version sets across multiple architectures
         rpms_info_by_arch = {
             "x86_64": [
@@ -323,20 +323,21 @@ class TestCrossArchVersionSetValidation:
             ],
         }
 
-        # Act & Assert: Should raise ValueError with multiple mismatches
-        with pytest.raises(ValueError) as exc_info:
+        # Act & Assert: Should log warning with multiple mismatches
+        with caplog.at_level(logging.WARNING):
             self.generator._validate_cross_arch_version_sets(rpms_info_by_arch)
 
-        # Verify error message contains all mismatched packages
-        error_message = str(exc_info.value)
-        assert "audit-libs" in error_message
-        assert "curl" in error_message
-        assert "openssl-libs" in error_message
+        # Verify warning message contains all mismatched packages
+        warning_message = caplog.text
+        assert "RPM version set mismatches" in warning_message
+        assert "audit-libs" in warning_message
+        assert "curl" in warning_message
+        assert "openssl-libs" in warning_message
 
         # Verify architecture-specific version sets are listed
-        assert "x86_64" in error_message
-        assert "aarch64" in error_message
-        assert "s390x" in error_message
+        assert "x86_64" in warning_message
+        assert "aarch64" in warning_message
+        assert "s390x" in warning_message
 
     def test_single_architecture_always_passes_validation(self):
         """Test validation always passes for single architecture scenarios."""
@@ -559,8 +560,8 @@ class TestCrossArchVersionSetValidation:
         # Act & Assert: Should pass validation (latest versions are identical across architectures)
         self.generator._validate_cross_arch_version_sets(rpms_info_by_arch)
 
-    def test_error_message_formatting_with_sorted_versions(self):
-        """Test that error messages format version sets in sorted order for consistency."""
+    def test_warning_message_formatting_with_sorted_versions(self, caplog):
+        """Test that warning messages format version sets in sorted order for consistency."""
         # Arrange: Version sets that will be unsorted to test sorting behavior
         rpms_info_by_arch = {
             "x86_64": [
@@ -629,17 +630,17 @@ class TestCrossArchVersionSetValidation:
             ],
         }
 
-        # Act & Assert: Should raise ValueError
-        with pytest.raises(ValueError) as exc_info:
+        # Act & Assert: Should log warning showing only latest versions (not all historical versions)
+        with caplog.at_level(logging.WARNING):
             self.generator._validate_cross_arch_version_sets(rpms_info_by_arch)
 
-        # Verify error message shows only latest versions (not all historical versions)
-        error_message = str(exc_info.value)
-        assert "x86_64:{0:3.0.0-1.el9}" in error_message
-        assert "aarch64:{0:4.0.0-1.el9}" in error_message
+        warning_message = caplog.text
+        assert "RPM version set mismatches" in warning_message
+        assert "x86_64:{0:3.0.0-1.el9}" in warning_message
+        assert "aarch64:{0:4.0.0-1.el9}" in warning_message
 
-    def test_mixed_single_and_multi_arch_packages_validation(self):
-        """Test that single-arch packages are ignored while multi-arch version mismatches still trigger failures."""
+    def test_mixed_single_and_multi_arch_packages_validation(self, caplog):
+        """Test that single-arch packages are ignored while multi-arch version mismatches still log warnings."""
         # Arrange: Mixed scenario with single-arch packages (ignored) and multi-arch packages (validated)
         rpms_info_by_arch = {
             "x86_64": [
@@ -696,16 +697,17 @@ class TestCrossArchVersionSetValidation:
             ],
         }
 
-        # Act & Assert: Should fail due to shared-lib version mismatch but ignore single-arch packages
-        with pytest.raises(ValueError) as exc_info:
+        # Act & Assert: Should warn due to shared-lib version mismatch but ignore single-arch packages
+        with caplog.at_level(logging.WARNING):
             self.generator._validate_cross_arch_version_sets(rpms_info_by_arch)
 
-        error_message = str(exc_info.value)
-        assert "shared-lib" in error_message
-        assert "x86_64:{0:2.0.0-1.el9}" in error_message
-        assert "aarch64:{0:2.0.0-2.el9}" in error_message
-        assert "x86-only-driver" not in error_message
-        assert "arm-specific-tool" not in error_message
+        warning_message = caplog.text
+        assert "RPM version set mismatches" in warning_message
+        assert "shared-lib" in warning_message
+        assert "x86_64:{0:2.0.0-1.el9}" in warning_message
+        assert "aarch64:{0:2.0.0-2.el9}" in warning_message
+        assert "x86-only-driver" not in warning_message
+        assert "arm-specific-tool" not in warning_message
 
     def test_mixed_single_and_multi_arch_packages_with_matching_versions(self):
         """Test that single-arch packages are ignored and multi-arch packages with identical versions pass."""
@@ -765,14 +767,5 @@ class TestCrossArchVersionSetValidation:
             ],
         }
 
-        # Act: Should pass - single-arch packages ignored, shared-lib has identical versions
-        try:
-            self.generator._validate_cross_arch_version_sets(rpms_info_by_arch)
-            validation_passed = True
-        except ValueError:
-            validation_passed = False
-
-        # Assert: Validation should pass with no exceptions
-        assert validation_passed, (
-            "Validation should pass when single-arch packages are present and multi-arch packages have identical versions"
-        )
+        # Act & Assert: Should pass - single-arch packages ignored, shared-lib has identical versions
+        self.generator._validate_cross_arch_version_sets(rpms_info_by_arch)

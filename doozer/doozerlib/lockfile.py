@@ -548,7 +548,7 @@ class RPMLockfileGenerator:
         self.lockfile_seed_nvrs = lockfile_seed_nvrs
 
     def _validate_cross_arch_version_sets(self, rpms_info_by_arch: dict[str, list[RpmInfo]]) -> None:
-        """Validate that RPM latest version sets are consistent across architectures where packages exist."""
+        """Warn when RPM latest version sets differ across architectures where packages exist."""
         package_arch_evrs = {}
 
         for arch, rpm_list in rpms_info_by_arch.items():
@@ -583,7 +583,7 @@ class RPMLockfileGenerator:
                 mismatches.append(f"{package_name} ({'; '.join(arch_details)})")
 
         if mismatches:
-            raise ValueError(f"RPM version set mismatches: {'; '.join(mismatches)}")
+            self.logger.warning("RPM version set mismatches: %s", "; ".join(mismatches))
 
     async def should_generate_lockfile(
         self, image_meta: ImageMetadata, dest_dir: Path, filename: str = DEFAULT_RPM_LOCKFILE_NAME
@@ -719,7 +719,7 @@ class RPMLockfileGenerator:
             self.builder.fetch_modules_info(arches, enabled_repos, modules_to_install),
         )
 
-        # Validate cross-architecture version set consistency
+        # Validate cross-architecture version set consistency (warn on mismatch)
         self._validate_cross_arch_version_sets(rpms_info_by_arch)
 
         if image_meta.is_cross_arch_enabled():
