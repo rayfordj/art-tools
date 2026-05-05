@@ -1339,7 +1339,7 @@ class ImageMetadata(Metadata):
         Returns:
             bool: True if base image release workflow should be triggered, False otherwise
         """
-        if getattr(self.runtime, 'variant', None) is BuildVariant.OKD:
+        if self.runtime.variant is BuildVariant.OKD:
             return False
         return self.is_base_image() or self.is_golang_builder()
 
