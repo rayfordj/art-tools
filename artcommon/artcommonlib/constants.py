@@ -139,10 +139,17 @@ PRODUCT_KUBECONFIG_MAP = {
 KONFLUX_DEFAULT_NAMESPACE = "ocp-art-tenant"
 
 # Base URL for fetching ReleasePlanAdmission YAMLs from konflux-release-data (GitLab raw)
-KONFLUX_RELEASE_DATA_RPA_BASE_URL = (
+OCP_RPA_BASE_URL = (
     "https://gitlab.cee.redhat.com/releng/konflux-release-data/-/raw/main/"
     "config/kflux-ocp-p01.7ayg.p1/product/ReleasePlanAdmission/ocp-art"
 )
+OCP_RPA_KINDS = {
+    "image": "ocp-art-advisory",
+    "metadata": "ocp-art-advisory",
+    "extras": "ocp-art-advisory",
+}
+OCP_RPA_ENVS = ["stage", "prod"]
+
 COREOS_RHEL10_STREAMS = [
     "rhel-coreos-10",
     "rhel-coreos-10-extensions",

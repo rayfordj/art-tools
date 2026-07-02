@@ -7,7 +7,7 @@ from typing import List, Optional, Set
 import aiohttp
 import click
 from artcommonlib import logutil
-from artcommonlib.constants import KONFLUX_RELEASE_DATA_RPA_BASE_URL
+from artcommonlib.constants import OCP_RPA_BASE_URL, OCP_RPA_ENVS, OCP_RPA_KINDS
 from artcommonlib.util import (
     get_utc_now_formatted_str,
     new_roundtrip_yaml_handler,
@@ -34,7 +34,7 @@ LOGGER = logutil.get_logger(__name__)
 
 
 async def fetch_rpa(rpa_name: str) -> dict:
-    url = f"{KONFLUX_RELEASE_DATA_RPA_BASE_URL}/{rpa_name}.yaml"
+    url = f"{OCP_RPA_BASE_URL}/{rpa_name}.yaml"
     headers = {}
     gitlab_token = os.environ.get("GITLAB_TOKEN")
     if gitlab_token:
@@ -56,32 +56,7 @@ async def fetch_rpa(rpa_name: str) -> dict:
     return rpa_data
 
 
-SUPPORTED_RPA_KINDS = {
-    "image": "ocp-art-advisory",
-    "metadata": "ocp-art-advisory",
-    "extras": "ocp-art-advisory",
-}
-
-
-async def validate_snapshot_against_rpa(group: str, env: str, kind: str, snapshot_components: List[str]) -> None:
-    match = re.fullmatch(r"openshift-(\d+)\.(\d+)", group)
-    if group.startswith("openshift-") and not match:
-        raise ValueError(f"Unrecognized openshift group format, refusing to skip RPA validation: {group!r}")
-    if not match:
-        return
-    major, minor = match.group(1), match.group(2)
-
-    # FBC allowedPackages use OLM package names which don't match Konflux component names
-    if kind == "fbc":
-        LOGGER.info("Skipping RPA validation for FBC releases (different naming scheme)")
-        return
-
-    if kind not in SUPPORTED_RPA_KINDS:
-        raise ValueError(
-            f"Unsupported release kind for RPA validation: {kind!r}. Supported: {sorted(SUPPORTED_RPA_KINDS)}"
-        )
-    rpa_name = f"{SUPPORTED_RPA_KINDS[kind]}-{env}-{major}-{minor}"
-
+async def _validate_snapshot_against_single_rpa(rpa_name: str, snapshot_components: List[str]) -> None:
     LOGGER.info("Fetching RPA %s to validate snapshot components...", rpa_name)
     rpa_data = await fetch_rpa(rpa_name)
 
@@ -103,6 +78,29 @@ async def validate_snapshot_against_rpa(group: str, env: str, kind: str, snapsho
         )
 
     LOGGER.info("All %d snapshot components validated against RPA %s", len(snapshot_names), rpa_name)
+
+
+async def validate_snapshot_against_rpa(group: str, env: str, kind: str, snapshot_components: List[str]) -> None:
+    match = re.fullmatch(r"openshift-(\d+)\.(\d+)", group)
+    if group.startswith("openshift-") and not match:
+        raise ValueError(f"Unrecognized openshift group format, refusing to skip RPA validation: {group!r}")
+    if not match:
+        return
+    major, minor = match.group(1), match.group(2)
+
+    # FBC allowedPackages use OLM package names which don't match Konflux component names
+    if kind == "fbc":
+        LOGGER.info("Skipping RPA validation for FBC releases (different naming scheme)")
+        return
+
+    if kind not in OCP_RPA_KINDS:
+        raise ValueError(f"Unsupported release kind for RPA validation: {kind!r}. Supported: {sorted(OCP_RPA_KINDS)}")
+
+    # Validate against both prod and stage RPAs
+    envs_to_check = [env] + [e for e in OCP_RPA_ENVS if e != env]
+    for check_env in envs_to_check:
+        rpa_name = f"{OCP_RPA_KINDS[kind]}-{check_env}-{major}-{minor}"
+        await _validate_snapshot_against_single_rpa(rpa_name, snapshot_components)
 
 
 @dataclass

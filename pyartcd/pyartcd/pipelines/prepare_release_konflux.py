@@ -28,7 +28,7 @@ from artcommonlib.assembly import (
     assembly_targeted_fixes_only,
 )
 from artcommonlib.constants import (
-    KONFLUX_RELEASE_DATA_RPA_BASE_URL,
+    OCP_RPA_BASE_URL,
     REGISTRY_QUAY_OCP_RELEASE_DEV,
     SHIPMENT_DATA_URL_TEMPLATE,
 )
@@ -1735,7 +1735,7 @@ class PrepareReleaseKonfluxPipeline:
         version_major = release_version[0]
         version_minor = release_version[1]
         policy_filename = f"ocp-art-advisory-stage-{version_major}-{version_minor}.yaml"
-        policy_url = f"{KONFLUX_RELEASE_DATA_RPA_BASE_URL}/{policy_filename}"
+        policy_url = f"{OCP_RPA_BASE_URL}/{policy_filename}"
 
         try:
             # Fetch the policy file
