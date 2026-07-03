@@ -56,8 +56,8 @@ async def fetch_rpa(rpa_name: str) -> dict:
     return rpa_data
 
 
-async def _validate_snapshot_against_single_rpa(rpa_name: str, snapshot_components: List[str]) -> None:
-    LOGGER.info("Fetching RPA %s to validate snapshot components...", rpa_name)
+async def _validate_snapshot_against_single_rpa(kind: str, rpa_name: str, snapshot_components: List[str]) -> None:
+    LOGGER.info("Validating %s shipment components against RPA %s...", kind, rpa_name)
     rpa_data = await fetch_rpa(rpa_name)
 
     allowed_names: Set[str] = set()
@@ -73,11 +73,16 @@ async def _validate_snapshot_against_single_rpa(rpa_name: str, snapshot_componen
     missing = snapshot_names - allowed_names
     if missing:
         raise ValueError(
-            f"The following snapshot components are not listed in RPA {rpa_name} "
+            f"The following {kind} shipment components are not listed in RPA {rpa_name} "
             f"and would be silently filtered out during release: {sorted(missing)}"
         )
 
-    LOGGER.info("All %d snapshot components validated against RPA %s", len(snapshot_names), rpa_name)
+    LOGGER.info(
+        "All %d snapshot components of %s shipment validated against RPA %s",
+        len(snapshot_names),
+        kind,
+        rpa_name,
+    )
 
 
 async def validate_snapshot_against_rpa(group: str, env: str, kind: str, snapshot_components: List[str]) -> None:
@@ -96,11 +101,13 @@ async def validate_snapshot_against_rpa(group: str, env: str, kind: str, snapsho
     if kind not in OCP_RPA_KINDS:
         raise ValueError(f"Unsupported release kind for RPA validation: {kind!r}. Supported: {sorted(OCP_RPA_KINDS)}")
 
-    # Validate against both prod and stage RPAs
+    if env not in OCP_RPA_ENVS:
+        raise ValueError(f"Unsupported release env for RPA validation: {env!r}. Supported: {OCP_RPA_ENVS}")
+
     envs_to_check = [env] + [e for e in OCP_RPA_ENVS if e != env]
     for check_env in envs_to_check:
         rpa_name = f"{OCP_RPA_KINDS[kind]}-{check_env}-{major}-{minor}"
-        await _validate_snapshot_against_single_rpa(rpa_name, snapshot_components)
+        await _validate_snapshot_against_single_rpa(kind, rpa_name, snapshot_components)
 
 
 @dataclass
