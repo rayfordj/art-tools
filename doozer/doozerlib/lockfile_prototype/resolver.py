@@ -8,6 +8,7 @@ dnf cannot be imported.
 """
 
 import logging
+import os
 import re
 import shutil
 from pathlib import Path
@@ -20,9 +21,10 @@ from artcommonlib.exectools import cmd_gather_async
 from doozerlib.lockfile_prototype.constants import (
     DEFAULT_RPM_INFILE_NAME,
     DEFAULT_RPM_LOCKFILE_NAME,
+    JENKINS_CACHE_DIR,
     RPM_LOCKFILE_ENTRY_POINT,
     RPMDB_CACHE_ERROR_PATTERNS,
-    RPMDB_CACHE_PATH,
+    RPMDB_CACHE_SUBDIR,
     SYSTEM_PYTHON,
     VALID_PKG_NAME,
 )
@@ -46,6 +48,19 @@ class RpmResolver:
             None if cache_dir else TemporaryDirectory(prefix="rpm-lockfile-cache-", dir=self._working_dir)
         )
         self._cache_path = cache_dir or self._cache_dir_owner.name
+
+        # In Jenkins, redirect the rpm-lockfile-prototype RPMDB cache to a
+        # persistent volume via XDG_CACHE_HOME so it survives across job runs
+        # and stays off the small root volume (~/.cache).
+        # Outside Jenkins, honour an existing XDG_CACHE_HOME if set.
+        if os.environ.get("JENKINS_HOME"):
+            self._xdg_cache_home: Path | None = JENKINS_CACHE_DIR
+        else:
+            self._xdg_cache_home = None
+        xdg_env = os.environ.get("XDG_CACHE_HOME")
+        cache_root = self._xdg_cache_home or (Path(xdg_env) if xdg_env else Path.home() / ".cache")
+        self._rpmdb_cache_path = cache_root / RPMDB_CACHE_SUBDIR
+        self.logger.info("RPMDB cache path: %s", self._rpmdb_cache_path)
 
     async def resolve(
         self,
@@ -81,6 +96,8 @@ class RpmResolver:
 
             env = build_env()
             env["RPM_LOCKFILE_PROTOTYPE_DNF_CACHE"] = self._cache_path
+            if self._xdg_cache_home:
+                env["XDG_CACHE_HOME"] = str(self._xdg_cache_home)
             env["TMPDIR"] = self._working_dir
             rc, _, stderr = await cmd_gather_async(cmd, check=False, env=env)
 
@@ -129,10 +146,10 @@ class RpmResolver:
         digest = match.group(1)
         cleared = False
 
-        if not RPMDB_CACHE_PATH.is_dir():
+        if not self._rpmdb_cache_path.is_dir():
             return False
 
-        for arch_dir in RPMDB_CACHE_PATH.iterdir():
+        for arch_dir in self._rpmdb_cache_path.iterdir():
             cache_entry = arch_dir / digest
             if cache_entry.is_dir():
                 self.logger.warning("Clearing corrupt RPMDB cache: %s", cache_entry)

@@ -164,6 +164,66 @@ class TestRpmResolver(unittest.TestCase):
         self.assertEqual(cache_dir_1, cache_dir_2)
         self.assertTrue(os.path.isdir(cache_dir_1))
 
+    @patch("doozerlib.lockfile_prototype.resolver.cmd_gather_async")
+    def test_sets_xdg_cache_home_in_jenkins(self, mock_gather):
+        """
+        When JENKINS_HOME is set, XDG_CACHE_HOME should point to the
+        persistent Jenkins cache directory.
+        """
+        captured_envs: list[dict] = []
+
+        async def mock_cmd(cmd, **kwargs):
+            captured_envs.append(dict(kwargs.get("env", {})))
+            outfile_idx = cmd.index("--outfile") + 1
+            with open(cmd[outfile_idx], "w") as f:
+                yaml.safe_dump(self.FAKE_LOCKFILE_DATA, f)
+            return (0, "", "")
+
+        mock_gather.side_effect = mock_cmd
+        with patch.dict(os.environ, {"JENKINS_HOME": "/var/jenkins"}):
+            resolver = RpmResolver(working_dir=Path(tempfile.mkdtemp()))
+            config = RpmsInConfig(
+                arches=["x86_64"],
+                contentOrigin={"repos": []},
+                packages=["nfs-utils"],
+            )
+            asyncio.run(resolver.resolve(config))
+
+        self.assertEqual(len(captured_envs), 1)
+        xdg = captured_envs[0]["XDG_CACHE_HOME"]
+        self.assertEqual(xdg, "/mnt/jenkins-workspace/rpm-lockfile-cache")
+
+    @patch("doozerlib.lockfile_prototype.resolver.cmd_gather_async")
+    def test_no_xdg_cache_home_outside_jenkins(self, mock_gather):
+        """
+        When JENKINS_HOME is not set, XDG_CACHE_HOME should not be
+        overridden in the subprocess env.
+        """
+        captured_envs: list[dict] = []
+
+        async def mock_cmd(cmd, **kwargs):
+            captured_envs.append(dict(kwargs.get("env", {})))
+            outfile_idx = cmd.index("--outfile") + 1
+            with open(cmd[outfile_idx], "w") as f:
+                yaml.safe_dump(self.FAKE_LOCKFILE_DATA, f)
+            return (0, "", "")
+
+        mock_gather.side_effect = mock_cmd
+        with patch.dict(os.environ, {}, clear=False):
+            env = os.environ.copy()
+            env.pop("JENKINS_HOME", None)
+            with patch.dict(os.environ, env, clear=True):
+                resolver = RpmResolver(working_dir=Path(tempfile.mkdtemp()))
+                config = RpmsInConfig(
+                    arches=["x86_64"],
+                    contentOrigin={"repos": []},
+                    packages=["nfs-utils"],
+                )
+                asyncio.run(resolver.resolve(config))
+
+        self.assertEqual(len(captured_envs), 1)
+        self.assertNotIn("XDG_CACHE_HOME", captured_envs[0])
+
 
 class TestParseMissingPackages(unittest.TestCase):
     def test_cli_format(self):
@@ -275,8 +335,8 @@ class TestClearRpmdbCache(unittest.TestCase):
             other_entry.mkdir(parents=True)
             (other_entry / "Packages").touch()
 
-            with patch("doozerlib.lockfile_prototype.resolver.RPMDB_CACHE_PATH", fake_cache):
-                cleared = self.resolver._clear_rpmdb_cache(pullspec)
+            self.resolver._rpmdb_cache_path = fake_cache
+            cleared = self.resolver._clear_rpmdb_cache(pullspec)
 
             self.assertTrue(cleared)
             self.assertFalse(cache_entry.exists())
@@ -294,8 +354,8 @@ class TestClearRpmdbCache(unittest.TestCase):
                 entry.mkdir(parents=True)
                 (entry / "Packages").touch()
 
-            with patch("doozerlib.lockfile_prototype.resolver.RPMDB_CACHE_PATH", fake_cache):
-                cleared = self.resolver._clear_rpmdb_cache(pullspec)
+            self.resolver._rpmdb_cache_path = fake_cache
+            cleared = self.resolver._clear_rpmdb_cache(pullspec)
 
             self.assertTrue(cleared)
             for arch in ("amd64", "arm64", "s390x"):
@@ -312,8 +372,8 @@ class TestClearRpmdbCache(unittest.TestCase):
         """
         Should return False when cache directory does not exist.
         """
-        with patch("doozerlib.lockfile_prototype.resolver.RPMDB_CACHE_PATH", Path("/nonexistent/path")):
-            cleared = self.resolver._clear_rpmdb_cache("registry.example.com/repo@sha256:abc123")
+        self.resolver._rpmdb_cache_path = Path("/nonexistent/path")
+        cleared = self.resolver._clear_rpmdb_cache("registry.example.com/repo@sha256:abc123")
         self.assertFalse(cleared)
 
 

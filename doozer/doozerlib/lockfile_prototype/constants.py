@@ -37,10 +37,15 @@ RPM_PSEUDO_PACKAGES = frozenset({"gpg-pubkey"})
 VALID_PKG_NAME = re.compile(r"^[a-zA-Z0-9*][a-zA-Z0-9._+\-*]*$")
 
 
-# rpm-lockfile-prototype stores extracted RPMDBs here. There is no env var
-# to override this path — only RPM_LOCKFILE_PROTOTYPE_DNF_CACHE controls
-# the DNF repodata cache, not the RPMDB cache.
-RPMDB_CACHE_PATH = Path.home() / ".cache" / "rpm-lockfile-prototype" / "rpmdbs"
+# rpm-lockfile-prototype stores extracted RPMDBs under
+# $XDG_CACHE_HOME/rpm-lockfile-prototype/rpmdbs (defaulting to ~/.cache).
+# We set XDG_CACHE_HOME in the subprocess env (see resolver.py) so that
+# the cache lands on persistent workspace storage in Jenkins instead of ~/.cache.
+RPMDB_CACHE_SUBDIR = Path("rpm-lockfile-prototype") / "rpmdbs"
+
+# Persistent cache root on Jenkins agents. This volume survives across job
+# runs, unlike the per-job workspace which is cleaned up after each build.
+JENKINS_CACHE_DIR = Path("/mnt/jenkins-workspace/rpm-lockfile-cache")
 
 # Patterns in rpm-lockfile-prototype stderr that indicate a broken RPMDB
 # cache entry. When matched, doozer clears the cached entry and retries.
