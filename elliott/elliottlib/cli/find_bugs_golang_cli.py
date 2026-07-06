@@ -93,6 +93,7 @@ class FindBugsGolangCli:
         output_format: str = None,
         rpms_only: bool = False,
         skip_comment: bool = False,
+        parse_changelog: bool = False,
     ):
         self._runtime = runtime
         self._logger = LOGGER
@@ -110,6 +111,7 @@ class FindBugsGolangCli:
         self.output_format = output_format
         self.rpms_only = rpms_only
         self.skip_comment = skip_comment
+        self.parse_changelog = parse_changelog
 
         # cache
         self.pullspec = pullspec
@@ -423,7 +425,7 @@ class FindBugsGolangCli:
                 f"No fixed in NVRs specified, using golang versions from report as fixed in versions: {self.fixed_in_nvrs}"
             )
 
-        if not self.cve_ids:
+        if not self.cve_ids and self.parse_changelog:
             cves = self._get_cves_from_nvr_changelogs()
             if cves:
                 self.cve_ids = tuple(sorted(cves))
@@ -776,6 +778,14 @@ class FindBugsGolangCli:
     default=False,
     help="When updating tracker, skip adding comment with analysis and just update status. Only applicable if --update-tracker is set.",
 )
+@click.option(
+    "--parse-changelog",
+    is_flag=True,
+    default=False,
+    help="Parse changelogs of --fixed-in-nvr build(s) to automatically determine additional CVE ID(s) that are "
+    "fixed, merging them with any CVE ID(s) given via --cve-id. Disabled by default: by default the command "
+    "only considers CVE ID(s) explicitly given via --cve-id as fixed.",
+)
 @click.pass_obj
 @click_coroutine
 async def find_bugs_golang_cli(
@@ -795,6 +805,7 @@ async def find_bugs_golang_cli(
     output_format: str,
     rpms_only: bool,
     skip_comment: bool = False,
+    parse_changelog: bool = False,
 ):
     """Find golang security tracker bugs in jira and determine if they are fixed.
     Trackers are fetched from the OCPBUGS project
@@ -803,11 +814,14 @@ async def find_bugs_golang_cli(
 
     IMPORTANT: If --fixed-in-nvr isnot specified, then NVRs are automatically determined from builders defined in streams.yml and brew buildroots.
 
-    CVE fixes are determined from changelogs of these brew builds, in combination with CVE IDs specified with --cve-id.
+    By default, only CVE ID(s) explicitly specified with --cve-id are considered fixed. Pass --parse-changelog to
+    additionally determine CVE fixes from changelogs of the --fixed-in-nvr build(s); these are merged with any
+    CVE ID(s) given via --cve-id. This is useful in case you want to consider changelog entries as an additional
+    source of truth for CVE fixes, but changelog entries are not always accurate or present, so this is disabled
+    by default.
     Multiple NVRs can be specified e.g. "--fixed-in-nvr NVR1 --fixed-in-nvr NVR2"
 
-    Pass in --cve-id to specify additional CVE ID(s) that are fixed which may not be present in changelogs of the specified NVRs. This is useful in case changelog entries are not accurate or missing.
-    Multiple CVE IDs can be specified e.g. "--cve-id CVE-A --cve-id CVE-B"
+    Pass in --cve-id to specify CVE ID(s) that are fixed. Multiple CVE IDs can be specified e.g. "--cve-id CVE-A --cve-id CVE-B"
 
     Pass in --analyze to determine if found bugs are fixed against the computed target fixed versions.
 
@@ -831,6 +845,9 @@ async def find_bugs_golang_cli(
     --component: Only operate on trackers for these JIRA Bug components e.g. openshift-golang-builder-container.
 
     --rpms-only: Ignore builder container bugs and only analyze RPM trackers.
+
+    --parse-changelog: Parse changelogs of --fixed-in-nvr build(s) to determine additional CVE ID(s) that are fixed,
+    merged with any CVE ID(s) given via --cve-id. Disabled by default.
 
     --exclude-bug-statuses: Exclude bugs in these statuses. If you wanted to analyze and report on all open bugs
     you would pass --exclude-bug-statuses="". Only used when not using --tracker-id.
@@ -893,6 +910,9 @@ async def find_bugs_golang_cli(
     if force_update_tracker and not cve_ids:
         raise click.BadParameter('Cannot use --force-update-tracker without --cve-id')
 
+    if parse_changelog and not fixed_in_nvrs:
+        raise click.BadParameter('Cannot use --parse-changelog without --fixed-in-nvr')
+
     runtime.initialize(mode="both")
     if runtime.assembly != 'stream' and analyze and not pullspec:
         releases_config = runtime.get_releases_config()
@@ -921,5 +941,6 @@ async def find_bugs_golang_cli(
         output_format=output_format,
         rpms_only=rpms_only,
         skip_comment=skip_comment,
+        parse_changelog=parse_changelog,
     )
     await cli.run()
