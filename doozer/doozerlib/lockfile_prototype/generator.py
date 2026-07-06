@@ -466,8 +466,12 @@ class RpmLockfilePrototypeGenerator:
                     # the Dockerfile packages so they appear in the lockfile
                     # even when already installed in the base image. Base image
                     # packages use upgrade semantics via upgrade_targets (set
-                    # above), so we intentionally do NOT reinstall them here.
-                    reinstall_pkgs = list(packages)
+                    # above), so we intentionally do NOT reinstall them here —
+                    # a Dockerfile package that's also a base image package
+                    # would otherwise get reinstalled at its currently-installed
+                    # EVR, which can win over the separate upgrade request and
+                    # silently keep an old version instead of upgrading.
+                    reinstall_pkgs = [p for p in packages if p not in base_pkgs]
                     strippable = set()
                     self.logger.info(
                         f"{distgit_key}: stage {stage_num}: {len(reinstall_pkgs)} Dockerfile "
@@ -1038,10 +1042,16 @@ class RpmLockfilePrototypeGenerator:
                 "continuing without reinstall packages"
             )
             remaining_reinstall.clear()
-        # Clear all upgrade targets and disable reinstall→upgrade promotion
-        # for the fallback — upgrade targets that reference packages not in
-        # the base image's rpmdb cause PackagesNotInstalledError from DNF.
-        remaining_update_targets.clear()
+        # Disable reinstall→upgrade promotion for the fallback — reinstall
+        # packages that aren't actually installed would cause
+        # PackagesNotInstalledError from DNF if promoted. Upgrade targets
+        # (base image packages) are left as-is: _resolve_fallback's own
+        # strip-and-retry loop already handles any that turn out to be
+        # unresolvable (e.g. arch-mismatched), so there's no need to
+        # blindly drop all of them — doing so would strand packages that
+        # are both a Dockerfile package and a base image package (only
+        # reachable via upgrade, since they're excluded from reinstall
+        # above) with no way to appear in the lockfile at all.
         promote_reinstall_to_upgrade = False
         self.upgrades_dropped = True
 
