@@ -667,6 +667,107 @@ class TestRpmLockfilePrototypeGenerator(unittest.TestCase):
         # dnf update picks up latest versions from repos
         self.assertEqual(sorted(captured_configs[0].upgradePackages), ["audit", "bash", "glibc", "openssl"])
 
+    def test_dockerfile_package_already_in_base_image_not_reinstalled(self):
+        """
+        A Dockerfile package that's also already installed in the base
+        image (e.g. python3-setuptools, part of both the explicit install
+        list and the base image's package set) must NOT be reinstalled —
+        only upgraded. Reinstalling it can trivially match the
+        currently-installed EVR and win over the separate upgrade
+        request, silently keeping an old version (e.g. a non-modular
+        build from the base repos) instead of picking up the newer one
+        the upgrade would have found.
+        """
+        meta = self._make_mock_image_meta()
+        meta.config.konflux.cachi2.lockfile.get.return_value = None
+        generator = self._make_generator()
+        generator.downstream_parents = ["quay.io/test/base@sha256:abc123"]
+        # python3-setuptools is already installed in the base image
+        generator._container.get_installed_packages = AsyncMock(return_value=["bash", "glibc", "python3-setuptools"])
+
+        captured_configs: list[RpmsInConfig] = []
+
+        async def capture_resolve(config, image_pullspec=None):
+            captured_configs.append(config)
+            return FAKE_LOCKFILE_DATA.model_copy(deep=True)
+
+        generator._resolver.resolve = AsyncMock(side_effect=capture_resolve)
+
+        with TemporaryDirectory() as tmpdir:
+            dest_dir = Path(tmpdir)
+            (dest_dir / "Dockerfile").write_text(
+                "FROM base\nRUN dnf upgrade -y && dnf install -y python3-setuptools git\n"
+            )
+            asyncio.run(generator.generate_lockfile(meta, dest_dir))
+
+        self.assertEqual(len(captured_configs), 1)
+        # python3-setuptools must NOT be reinstalled — it's a base image
+        # package and must go through upgrade semantics only
+        self.assertNotIn("python3-setuptools", captured_configs[0].reinstallPackages)
+        # git is purely a Dockerfile package (not in the base image) and
+        # must still be reinstalled as before
+        self.assertIn("git", captured_configs[0].reinstallPackages)
+        # python3-setuptools must still be present as an upgrade target
+        self.assertIn("python3-setuptools", captured_configs[0].upgradePackages)
+        # And still present in the plain install list
+        pkg_names = [p if isinstance(p, str) else p.name for p in captured_configs[0].packages]
+        self.assertIn("python3-setuptools", pkg_names)
+
+    def test_base_image_overlap_package_survives_retry_exhaustion_fallback(self):
+        """
+        When the main retry loop exhausts (unrelated packages keep
+        failing) and falls back, a Dockerfile package that's also a base
+        image package (only reachable via upgrade semantics, since it's
+        excluded from reinstall) must still make it into the fallback's
+        upgradePackages — not get wiped out by a blanket upgrade-targets
+        clear before the fallback runs.
+        """
+        meta = self._make_mock_image_meta()
+        meta.config.konflux.cachi2.lockfile.get.return_value = None
+        generator = self._make_generator()
+        generator.downstream_parents = ["quay.io/test/base@sha256:abc123"]
+        # python3-setuptools is both a Dockerfile package and already
+        # installed; the other 5 are pure base image noise that will each
+        # fail resolution in turn, exhausting the main retry loop.
+        failing_pkgs = [f"base-noise-{i}" for i in range(5)]
+        generator._container.get_installed_packages = AsyncMock(return_value=["python3-setuptools"] + failing_pkgs)
+
+        call_count = 0
+
+        async def mock_resolve(config, image_pullspec=None):
+            nonlocal call_count
+            call_count += 1
+            pkg_names = [p if isinstance(p, str) else p.name for p in (config.packages or [])]
+            pkg_names += config.reinstallPackages or []
+            pkg_names += config.upgradePackages or []
+            for pkg in failing_pkgs:
+                if pkg in pkg_names:
+                    raise RuntimeError(f"No match for argument: {pkg}")
+            return FAKE_LOCKFILE_DATA.model_copy(deep=True)
+
+        generator._resolver.resolve = AsyncMock(side_effect=mock_resolve)
+
+        with TemporaryDirectory() as tmpdir:
+            dest_dir = Path(tmpdir)
+            (dest_dir / "Dockerfile").write_text(
+                "FROM base\nRUN dnf upgrade -y && dnf install -y python3-setuptools git\n"
+            )
+            asyncio.run(generator.generate_lockfile(meta, dest_dir))
+
+        self.assertTrue(generator.upgrades_dropped)
+        # Fallback should have been reached (5 main-loop retries exhausted).
+        # Some later calls are _recover_stripped_per_arch attempts for the
+        # noise packages (unrelated to this assertion), so check across all
+        # calls rather than assuming a fixed index: python3-setuptools must
+        # have been offered as an upgrade target at some point post-fallback,
+        # never as a reinstall target.
+        all_configs = [c.args[0] for c in generator._resolver.resolve.call_args_list]
+        self.assertTrue(
+            any("python3-setuptools" in (c.upgradePackages or []) for c in all_configs),
+            "python3-setuptools should appear in upgradePackages in at least one resolve call",
+        )
+        self.assertTrue(all("python3-setuptools" not in (c.reinstallPackages or []) for c in all_configs))
+
     def test_reinstall_packages_also_passed_as_upgrade_targets(self):
         """
         Base image packages passed as reinstallPackages must also appear
