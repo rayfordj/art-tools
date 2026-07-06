@@ -458,6 +458,7 @@ class KonfluxOkdPipeline:
                     f'count:build-failure:konflux:{group}:{image}',
                     jenkins_url=job_url,
                     nvr=failed_entries.get(image, {}).get('nvrs'),
+                    pipeline_url=failed_entries.get(image, {}).get('build_pipeline_url'),
                 )
                 for image in failed_images
             ]
