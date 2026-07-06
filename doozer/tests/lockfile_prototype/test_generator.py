@@ -714,12 +714,11 @@ class TestRpmLockfilePrototypeGenerator(unittest.TestCase):
         generator.downstream_parents = ["quay.io/test/base@sha256:abc123"]
         generator._container.get_installed_packages = AsyncMock(return_value=["nonexistent-pkg", "glibc"])
 
-        call_count = 0
-
         async def mock_resolve(config, image_pullspec=None):
-            nonlocal call_count
-            call_count += 1
-            if call_count == 1:
+            pkg_names = [p if isinstance(p, str) else p.name for p in (config.packages or [])]
+            pkg_names += config.reinstallPackages or []
+            pkg_names += config.upgradePackages or []
+            if "nonexistent-pkg" in pkg_names:
                 raise RuntimeError("No match for argument: nonexistent-pkg")
             return FAKE_LOCKFILE_DATA.model_copy(deep=True)
 
@@ -730,8 +729,10 @@ class TestRpmLockfilePrototypeGenerator(unittest.TestCase):
             (dest_dir / "Dockerfile").write_text("FROM base\nRUN dnf install -y curl\n")
             asyncio.run(generator.generate_lockfile(meta, dest_dir))
 
-        # First attempt fails, then early exit + fallback = 2 calls total
-        self.assertEqual(call_count, 2)
+        # First attempt fails, early exit + fallback succeeds, then per-arch
+        # recovery is attempted for the stripped package (2 arches, both fail
+        # since nonexistent-pkg is genuinely unavailable everywhere) = 4 calls.
+        self.assertEqual(generator._resolver.resolve.call_count, 4)
         # Fallback should drop all optional reinstall packages
         fallback_config = generator._resolver.resolve.call_args_list[1][0][0]
         self.assertEqual(fallback_config.reinstallPackages, [])
@@ -751,12 +752,11 @@ class TestRpmLockfilePrototypeGenerator(unittest.TestCase):
         generator.downstream_parents = ["quay.io/test/base@sha256:abc123"]
         generator._container.get_installed_packages = AsyncMock(return_value=["bad-pkg", "glibc"])
 
-        call_count = 0
-
         async def mock_resolve(config, image_pullspec=None):
-            nonlocal call_count
-            call_count += 1
-            if call_count == 1:
+            pkg_names = [p if isinstance(p, str) else p.name for p in (config.packages or [])]
+            pkg_names += config.reinstallPackages or []
+            pkg_names += config.upgradePackages or []
+            if "bad-pkg" in pkg_names:
                 raise RuntimeError("No match for argument: bad-pkg")
             return FAKE_LOCKFILE_DATA.model_copy(deep=True)
 
@@ -770,7 +770,10 @@ class TestRpmLockfilePrototypeGenerator(unittest.TestCase):
             asyncio.run(generator.generate_lockfile(meta, dest_dir))
 
         self.assertTrue(generator.upgrades_dropped)
-        fallback_config = generator._resolver.resolve.call_args_list[-1][0][0]
+        # Index 1 is the fallback call (index 0 fails, indices 2+ are the
+        # per-arch recovery attempts for the stripped bad-pkg, which also
+        # fail since it's genuinely unavailable everywhere).
+        fallback_config = generator._resolver.resolve.call_args_list[1][0][0]
         self.assertEqual(fallback_config.upgradePackages, [])
 
     def test_fallback_packages_used_when_image_unreachable(self):
@@ -875,12 +878,10 @@ class TestRpmLockfilePrototypeGenerator(unittest.TestCase):
         generator = self._make_generator()
         generator.downstream_parents = ["quay.io/test/base@sha256:abc123"]
 
-        call_count = 0
-
         async def mock_resolve(config, image_pullspec=None):
-            nonlocal call_count
-            call_count += 1
-            if call_count == 1:
+            pkg_names = [p if isinstance(p, str) else p.name for p in (config.packages or [])]
+            pkg_names += config.upgradePackages or []
+            if "dmidecode" in pkg_names:
                 raise RuntimeError("No match for argument: dmidecode")
             return FAKE_LOCKFILE_DATA.model_copy(deep=True)
 
@@ -891,7 +892,9 @@ class TestRpmLockfilePrototypeGenerator(unittest.TestCase):
             (dest_dir / "Dockerfile").write_text("FROM base\nRUN yum -y install nfs-utils dmidecode\n")
             asyncio.run(generator.generate_lockfile(meta, dest_dir))
 
-            self.assertEqual(generator._resolver.resolve.call_count, 2)
+            # 1 failing attempt + 1 successful retry + 2 per-arch recovery
+            # attempts for dmidecode (both fail, genuinely unavailable) = 4.
+            self.assertEqual(generator._resolver.resolve.call_count, 4)
             self.assertTrue((dest_dir / "rpms.lock.yaml").exists())
 
     def test_resolve_stage_with_retry_no_upgrade_packages_when_bare(self):
@@ -1262,6 +1265,141 @@ class TestRpmLockfilePrototypeGenerator(unittest.TestCase):
         self.assertIn("git", final_config.reinstallPackages)
         for pkg in failing_pkgs:
             self.assertNotIn(pkg, final_config.reinstallPackages)
+
+    def test_fallback_strips_newly_discovered_missing_package(self):
+        """
+        A package that only surfaces as missing once the retry loop is
+        already exhausted (e.g. dmidecode, only on x86_64) must still be
+        stripped by the fallback instead of crashing the whole resolve
+        with an unguarded RuntimeError.
+        """
+        generator = self._make_generator()
+        generator.downstream_parents = ["quay.io/test/base@sha256:abc123"]
+
+        failing_pkgs = [f"base-pkg-{i}" for i in range(5)]
+        call_count = 0
+
+        async def mock_resolve(config, image_pullspec=None):
+            nonlocal call_count
+            call_count += 1
+            if call_count <= 5:
+                raise RuntimeError(f"No match for argument: {failing_pkgs[call_count - 1]}")
+            if call_count == 6:
+                raise RuntimeError("No match for argument: dmidecode")
+            return FAKE_LOCKFILE_DATA.model_copy(deep=True)
+
+        generator._resolver.resolve = AsyncMock(side_effect=mock_resolve)
+
+        repos = [
+            RepoEntry(
+                repoid="rhel-9-baseos-rpms",
+                baseurl="https://example.com/baseos/$basearch/os/",
+            )
+        ]
+
+        result = asyncio.run(
+            generator._resolve_stage_with_retry(
+                repo_list=repos,
+                arches=["x86_64", "aarch64"],
+                packages=["git", "dmidecode"] + failing_pkgs,
+                arch_pkgs={},
+                update_targets=[],
+                image_pullspec="quay.io/test/base@sha256:abc123",
+                distgit_key="ose-baremetal-installer",
+                stage_num=0,
+                strippable_packages=set(failing_pkgs),
+            )
+        )
+
+        self.assertIsNotNone(result)
+        # 5 main-loop retries + 1 fallback failure on dmidecode + 1 successful fallback retry
+        self.assertEqual(call_count, 7)
+        final_config = generator._resolver.resolve.call_args_list[6][0][0]
+        pkg_names = [p if isinstance(p, str) else p.name for p in final_config.packages]
+        self.assertNotIn("dmidecode", pkg_names)
+        self.assertIn("git", pkg_names)
+
+    def test_fallback_raises_after_exhausting_its_own_retries(self):
+        """
+        If the fallback itself keeps hitting new missing packages beyond
+        its retry budget, it must raise a clear RuntimeError rather than
+        looping forever or crashing with a raw parse failure.
+        """
+        generator = self._make_generator()
+        generator.downstream_parents = ["quay.io/test/base@sha256:abc123"]
+
+        # 5 distinct packages for the main loop, then 5 more distinct
+        # packages that only ever surface during the fallback loop.
+        main_failing = [f"base-pkg-{i}" for i in range(5)]
+        fallback_failing = [f"arch-only-pkg-{i}" for i in range(5)]
+        call_count = 0
+
+        async def mock_resolve(config, image_pullspec=None):
+            nonlocal call_count
+            call_count += 1
+            if call_count <= 5:
+                raise RuntimeError(f"No match for argument: {main_failing[call_count - 1]}")
+            raise RuntimeError(f"No match for argument: {fallback_failing[call_count - 6]}")
+
+        generator._resolver.resolve = AsyncMock(side_effect=mock_resolve)
+
+        repos = [
+            RepoEntry(
+                repoid="rhel-9-baseos-rpms",
+                baseurl="https://example.com/baseos/$basearch/os/",
+            )
+        ]
+
+        with self.assertRaises(RuntimeError) as ctx:
+            asyncio.run(
+                generator._resolve_stage_with_retry(
+                    repo_list=repos,
+                    arches=["x86_64", "aarch64"],
+                    packages=["git"] + main_failing + fallback_failing,
+                    arch_pkgs={},
+                    update_targets=[],
+                    image_pullspec="quay.io/test/base@sha256:abc123",
+                    distgit_key="ose-baremetal-installer",
+                    stage_num=0,
+                    strippable_packages=set(main_failing),
+                )
+            )
+
+        self.assertIn("exceeded", str(ctx.exception))
+        # 5 main-loop attempts + 5 fallback attempts, no more calls after that
+        self.assertEqual(call_count, 10)
+
+    def test_bare_update_final_stage_triggers_per_arch_recovery(self):
+        """
+        End-to-end: final stage with a bare 'dnf upgrade -y' plus an
+        explicit install (has_bare_update=True, is_update_only=False)
+        strips an arch-specific base image package (e.g. dmidecode).
+        Per-arch recovery must still be attempted for this stage shape,
+        not just for is_update_only stages.
+        """
+        meta = self._make_mock_image_meta()
+        generator = self._make_generator()
+        generator.downstream_parents = ["quay.io/test/base@sha256:abc123"]
+        generator._container.get_installed_packages = AsyncMock(return_value=["curl", "dmidecode"])
+        generator._recover_stripped_per_arch = AsyncMock(return_value=None)
+
+        async def mock_resolve(config, image_pullspec=None):
+            pkg_names = [p if isinstance(p, str) else p.name for p in (config.packages or [])]
+            pkg_names += config.upgradePackages or []
+            if "dmidecode" in pkg_names:
+                raise RuntimeError("No match for argument: dmidecode")
+            return FAKE_LOCKFILE_DATA.model_copy(deep=True)
+
+        generator._resolver.resolve = AsyncMock(side_effect=mock_resolve)
+
+        with TemporaryDirectory() as tmpdir:
+            dest_dir = Path(tmpdir)
+            (dest_dir / "Dockerfile").write_text("FROM base-rhel9\nRUN dnf upgrade -y && dnf install -y curl\n")
+            asyncio.run(generator.generate_lockfile(meta, dest_dir))
+
+        generator._recover_stripped_per_arch.assert_awaited_once()
+        stripped_arg = generator._recover_stripped_per_arch.call_args[0][2]
+        self.assertIn("dmidecode", stripped_arg)
 
     def test_builder_stage_strips_unavailable_packages_silently(self):
         """

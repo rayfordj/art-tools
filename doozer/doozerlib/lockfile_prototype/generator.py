@@ -542,7 +542,12 @@ class RpmLockfilePrototypeGenerator:
                 stripped_tracker=stripped_tracker,
             )
             if result:
-                if stripped_tracker and image_pullspec and is_update_only:
+                # Any stage shape can inject base image packages (upgrade
+                # targets, reinstall packages, conflict-detection extras)
+                # that include arch-specific packages (e.g. dmidecode,
+                # x86-only) and get stripped during resolution. Try to
+                # recover them per-arch rather than dropping silently.
+                if stripped_tracker and image_pullspec:
                     recovered = await self._recover_stripped_per_arch(
                         repo_list,
                         arches,
@@ -1038,7 +1043,8 @@ class RpmLockfilePrototypeGenerator:
         remaining_update_targets.clear()
         promote_reinstall_to_upgrade = False
         self.upgrades_dropped = True
-        in_yaml = self._build_resolve_config(
+
+        return await self._resolve_fallback(
             repo_list,
             arches,
             remaining_packages,
@@ -1047,9 +1053,72 @@ class RpmLockfilePrototypeGenerator:
             remaining_reinstall,
             promote_reinstall_to_upgrade,
             image_pullspec,
+            resolver_pullspec,
             module_enable,
+            distgit_key,
+            stage_num,
+            stripped_tracker,
         )
-        return await self._resolver.resolve(in_yaml, image_pullspec=resolver_pullspec)
+
+    async def _resolve_fallback(
+        self,
+        repo_list: list[RepoEntry],
+        arches: list[str],
+        remaining_packages: list[str],
+        arch_pkgs: dict[str, list[str]],
+        remaining_update_targets: list[str],
+        remaining_reinstall: list[str],
+        promote_reinstall_to_upgrade: bool,
+        image_pullspec: str | None,
+        resolver_pullspec: str | None,
+        module_enable: list[str] | None,
+        distgit_key: str,
+        stage_num: int,
+        stripped_tracker: set[str] | None,
+    ) -> LockfileData | None:
+        """
+        Last-resort resolve after the main retry loop is exhausted.
+
+        Can still hit packages that are missing for a subset of arches
+        (e.g. base image packages like dmidecode that only exist on
+        x86_64) — keep stripping until it resolves instead of letting a
+        single unguarded call blow up the whole rebase.
+        """
+        for _attempt in range(MAX_RESOLUTION_RETRIES):
+            in_yaml = self._build_resolve_config(
+                repo_list,
+                arches,
+                remaining_packages,
+                arch_pkgs,
+                remaining_update_targets,
+                remaining_reinstall,
+                promote_reinstall_to_upgrade,
+                image_pullspec,
+                module_enable,
+            )
+            try:
+                return await self._resolver.resolve(in_yaml, image_pullspec=resolver_pullspec)
+            except RuntimeError as e:
+                missing = RpmResolver.parse_missing_packages(str(e))
+                if not missing:
+                    raise
+                removed = self._strip_missing_packages(
+                    missing, remaining_packages, remaining_update_targets, remaining_reinstall, arch_pkgs
+                )
+                if not removed:
+                    raise
+                if stripped_tracker is not None:
+                    stripped_tracker.update(missing)
+                self.logger.warning(
+                    f"{distgit_key}: stage {stage_num}: fallback retry without unavailable packages: "
+                    f"{sorted(missing)}"
+                )
+                if not remaining_packages and not arch_pkgs and not remaining_reinstall:
+                    self.logger.warning(
+                        f"{distgit_key}: stage {stage_num}: no packages remaining after fallback filtering, skipping"
+                    )
+                    return None
+        raise RuntimeError(f"{distgit_key}: stage {stage_num}: exceeded {MAX_RESOLUTION_RETRIES} fallback retries")
 
     def _assemble_lockfile(self, stage_lockfiles: list[LockfileData], image_meta: ImageMetadata) -> LockfileData:
         """
