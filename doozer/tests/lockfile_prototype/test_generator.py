@@ -2027,8 +2027,11 @@ class TestHasRhelVersionMismatch(unittest.TestCase):
 
 class TestRhelMismatchEndToEnd(unittest.TestCase):
     """
-    End-to-end: builder stage with el8 pullspec + el9 repos should skip
-    base image packages and resolve only Dockerfile packages in bare mode.
+    End-to-end: builder stage with el8 pullspec + el9 repos has no repos
+    that can soundly resolve its packages (mixing el8 and el9 repos in
+    one rpm-lockfile-prototype call breaks module resolution), so the
+    whole stage's packages must be skipped rather than resolved against
+    the wrong RHEL major.
     """
 
     def _make_mock_repos(self) -> MagicMock:
@@ -2054,7 +2057,7 @@ class TestRhelMismatchEndToEnd(unittest.TestCase):
         meta.config.konflux.cachi2.lockfile = lockfile_config
         return meta
 
-    def test_el8_builder_skips_base_image_packages(self):
+    def test_el8_builder_skips_entire_stage(self):
         container = MagicMock(spec=ContainerImageHelper)
         container.resolve_to_digest = AsyncMock(side_effect=lambda p: p.split(":")[0] + "@sha256:abc123")
         container.get_installed_packages = AsyncMock(return_value=["gcc", "glibc", "readline"])
@@ -2085,20 +2088,10 @@ class TestRhelMismatchEndToEnd(unittest.TestCase):
             )
             asyncio.run(generator.generate_lockfile(self._make_mock_image_meta(), dest_dir))
 
-            # Resolver should have been called for stage 0 in bare mode
-            # (image_pullspec=None) because of RHEL mismatch
-            calls = resolver.resolve.call_args_list
-            stage0_call = calls[0]
-            self.assertIsNone(
-                stage0_call.kwargs.get("image_pullspec"),
-                "Stage 0 should use bare mode (image_pullspec=None) due to RHEL mismatch",
-            )
-
-            # Base image packages should NOT have been added to the install
-            # list — only the Dockerfile package should be present
-            config = stage0_call.args[0]
-            pkg_names = [p if isinstance(p, str) else p.name for p in config.packages]
-            self.assertIn("subscription-manager", pkg_names)
-            self.assertNotIn("gcc", pkg_names, "Base image packages should not be in install list")
-            self.assertNotIn("glibc", pkg_names, "Base image packages should not be in install list")
-            self.assertNotIn("readline", pkg_names, "Base image packages should not be in install list")
+            # Stage 0 (el8 builder, el9-only repos) must be skipped entirely —
+            # no repos exist that could soundly resolve its packages, so it's
+            # dropped from the lockfile rather than pinning a mismatched RPM.
+            # The final stage has no install/update commands, so no stage
+            # ever reaches the resolver.
+            resolver.resolve.assert_not_called()
+            self.assertTrue((dest_dir / "rpms.lock.yaml").exists())

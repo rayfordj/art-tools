@@ -506,22 +506,23 @@ class RpmLockfilePrototypeGenerator:
                 # install list for conflict detection.
                 #
                 # When the builder image RHEL version differs from the repos
-                # (e.g. el8 builder with el9 repos), skip --image mode and
-                # base image packages — cross-RHEL depsolve is unsolvable.
+                # (e.g. el8 builder with el9 repos), the stage's own packages
+                # can't be soundly resolved either — the only repos we have
+                # are for the wrong RHEL major, so skip locking this stage's
+                # packages entirely rather than pinning a mismatched RPM.
                 if self._has_rhel_version_mismatch(stage_num, repo_list, distgit_key):
-                    image_pullspec = None
-                else:
-                    if image_pullspec:
-                        reinstall_pkgs = list(packages)
-                    base_pkgs = await self._get_base_image_packages(stage_num, image_pullspec, distgit_key)
-                    if base_pkgs:
-                        extra = [p for p in base_pkgs if p not in packages]
-                        if extra:
-                            packages = packages + extra
-                            self.logger.info(
-                                f"{distgit_key}: stage {stage_num}: {len(extra)} base image "
-                                "packages added to install list for conflict detection"
-                            )
+                    continue
+                if image_pullspec:
+                    reinstall_pkgs = list(packages)
+                base_pkgs = await self._get_base_image_packages(stage_num, image_pullspec, distgit_key)
+                if base_pkgs:
+                    extra = [p for p in base_pkgs if p not in packages]
+                    if extra:
+                        packages = packages + extra
+                        self.logger.info(
+                            f"{distgit_key}: stage {stage_num}: {len(extra)} base image "
+                            "packages added to install list for conflict detection"
+                        )
 
             enable_only = [s.split("/")[0] for s in stage_info.module_specs] if stage_info.module_specs else None
 
@@ -717,7 +718,7 @@ class RpmLockfilePrototypeGenerator:
             self.logger.warning(
                 f"{distgit_key}: stage {stage_num}: RHEL version mismatch — "
                 f"builder image is el{builder_rhel} but repos are el{repo_rhel}; "
-                f"skipping base image packages and --image mode for this stage"
+                f"skipping package resolution for this stage entirely"
             )
             return True
         return False
@@ -1110,8 +1111,7 @@ class RpmLockfilePrototypeGenerator:
                 if stripped_tracker is not None:
                     stripped_tracker.update(missing)
                 self.logger.warning(
-                    f"{distgit_key}: stage {stage_num}: fallback retry without unavailable packages: "
-                    f"{sorted(missing)}"
+                    f"{distgit_key}: stage {stage_num}: fallback retry without unavailable packages: {sorted(missing)}"
                 )
                 if not remaining_packages and not arch_pkgs and not remaining_reinstall:
                     self.logger.warning(
