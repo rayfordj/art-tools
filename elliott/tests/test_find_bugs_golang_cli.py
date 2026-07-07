@@ -1,4 +1,4 @@
-from unittest import TestCase
+from unittest import IsolatedAsyncioTestCase, TestCase
 from unittest.mock import MagicMock, patch
 
 from artcommonlib.release_util import get_patch_from_release
@@ -26,6 +26,51 @@ def _make_cli(**overrides):
     )
     defaults.update(overrides)
     return FindBugsGolangCli(**defaults)
+
+
+class TestChangelogParsingFlag(IsolatedAsyncioTestCase):
+    def test_parse_changelog_defaults_to_false(self):
+        cli = _make_cli()
+        self.assertFalse(cli.parse_changelog)
+
+    def _make_runnable_cli(self, **overrides):
+        """Build a CLI whose run() reaches the changelog-parsing decision point and
+        then exits early (no bugs found), so tests can assert on _get_cves_from_nvr_changelogs
+        without needing to mock the rest of the (heavy) bug-analysis pipeline.
+        """
+        runtime = MagicMock()
+        runtime.get_major_minor.return_value = (4, 17)
+        cli = _make_cli(
+            runtime=runtime,
+            fixed_in_nvrs=("golang-1.22.12-11.el9",),
+            tracker_ids=("OCPBUGS-1",),
+            **overrides,
+        )
+        cli.jira_tracker.get_bugs.return_value = []
+        return cli
+
+    @patch("elliottlib.cli.find_bugs_golang_cli.golang_report_for_version", return_value=[])
+    @patch.object(FindBugsGolangCli, "_get_cves_from_nvr_changelogs")
+    async def test_changelog_not_parsed_when_flag_disabled(self, mock_get_cves, _mock_report):
+        cli = self._make_runnable_cli(cve_ids=(), parse_changelog=False)
+        await cli.run()
+        mock_get_cves.assert_not_called()
+
+    @patch("elliottlib.cli.find_bugs_golang_cli.golang_report_for_version", return_value=[])
+    @patch.object(FindBugsGolangCli, "_get_cves_from_nvr_changelogs")
+    async def test_changelog_parsed_when_flag_enabled(self, mock_get_cves, _mock_report):
+        mock_get_cves.return_value = {"CVE-2024-1394"}
+        cli = self._make_runnable_cli(cve_ids=(), parse_changelog=True)
+        await cli.run()
+        mock_get_cves.assert_called_once()
+        self.assertEqual(cli.cve_ids, ("CVE-2024-1394",))
+
+    @patch("elliottlib.cli.find_bugs_golang_cli.golang_report_for_version", return_value=[])
+    @patch.object(FindBugsGolangCli, "_get_cves_from_nvr_changelogs")
+    async def test_changelog_not_parsed_when_cve_ids_explicitly_given(self, mock_get_cves, _mock_report):
+        cli = self._make_runnable_cli(cve_ids=("CVE-2024-1394",), parse_changelog=True)
+        await cli.run()
+        mock_get_cves.assert_not_called()
 
 
 def _make_bug(bug_id="OCPBUGS-99999", component="openshift-golang-builder-container"):
