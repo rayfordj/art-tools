@@ -1223,6 +1223,13 @@ class KonfluxFbcRebaser:
                 # and add the bundle name of bundle_with_skips to the skips field
                 skips = set(bundle_with_skips.pop('skips'))
                 skips = (skips | {bundle_with_skips['name']}) - {olm_bundle_name}
+                # Also collect skips from any remaining entries (handles branching
+                # upgrade graphs where multiple entries independently define skips)
+                for other in channel['entries']:
+                    if other is not bundle_with_skips and other.get('skips'):
+                        skips.update(other.pop('skips'))
+                        skips.add(other['name'])
+                skips.discard(olm_bundle_name)
             elif len(channel['entries']) == 1:
                 # The channel only has one entry like
                 # ------------
