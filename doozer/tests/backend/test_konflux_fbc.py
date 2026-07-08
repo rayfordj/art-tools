@@ -9,6 +9,8 @@ from artcommonlib.konflux.konflux_build_record import KonfluxBuildOutcome, Konfl
 from doozerlib.backend.build_repo import BuildRepo
 from doozerlib.backend.konflux_client import ImageBuildParams, KonfluxClient
 from doozerlib.backend.konflux_fbc import (
+    BASE_IMAGE_RHEL8_PULLSPEC_FORMAT,
+    BASE_IMAGE_RHEL9_PULLSPEC_FORMAT,
     AssemblyBundleCsvInfo,
     KonfluxFbcBuilder,
     KonfluxFbcFragmentMerger,
@@ -590,8 +592,8 @@ class TestKonfluxFbcRebaser(unittest.IsolatedAsyncioTestCase):
         mock_generate_dockerfile.assert_awaited_once_with(
             build_repo.local_dir,
             'catalog',
-            base_image='registry.redhat.io/openshift4/ose-operator-registry:v1.1',
-            builder_image='registry.redhat.io/openshift4/ose-operator-registry:v1.1',
+            base_image='registry.redhat.io/openshift1/ose-operator-registry:v1.1',
+            builder_image='registry.redhat.io/openshift1/ose-operator-registry:v1.1',
         )
 
     def test_generate_image_digest_mirror_set(self):
@@ -2972,6 +2974,26 @@ spec:
 
         result = await self.merger._merge_idms(["example.com/idm1", "example.com/idm2", "example.com/idm3"])
         self.assertEqual(result, expected)
+
+
+class TestBaseImagePullspecFormat(unittest.TestCase):
+    """Test that FBC base image pullspec format strings use the correct registry namespace."""
+
+    def test_ocp4_rhel9_base_image(self):
+        result = BASE_IMAGE_RHEL9_PULLSPEC_FORMAT.format(major=4, minor=17)
+        self.assertEqual(result, "registry.redhat.io/openshift4/ose-operator-registry-rhel9:v4.17")
+
+    def test_ocp5_rhel9_base_image(self):
+        result = BASE_IMAGE_RHEL9_PULLSPEC_FORMAT.format(major=5, minor=0)
+        self.assertEqual(result, "registry.redhat.io/openshift5/ose-operator-registry-rhel9:v5.0")
+
+    def test_ocp4_rhel8_base_image(self):
+        result = BASE_IMAGE_RHEL8_PULLSPEC_FORMAT.format(major=4, minor=14)
+        self.assertEqual(result, "registry.redhat.io/openshift4/ose-operator-registry:v4.14")
+
+    def test_ocp5_rhel8_base_image(self):
+        result = BASE_IMAGE_RHEL8_PULLSPEC_FORMAT.format(major=5, minor=0)
+        self.assertEqual(result, "registry.redhat.io/openshift5/ose-operator-registry:v5.0")
 
 
 class TestGenerateFbcBranchName(unittest.TestCase):
