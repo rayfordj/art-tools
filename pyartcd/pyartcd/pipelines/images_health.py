@@ -192,14 +192,14 @@ class ImagesHealthPipeline:
 
     async def _get_valid_images(self, version: str, doozer_working: str) -> set[str]:
         """
-        Get the set of valid image names for a given version from ocp-build-data.
+        Get the set of valid image distgit keys for a given version from ocp-build-data.
         Results are cached per version to avoid duplicate doozer subprocess calls.
 
         Arg(s):
             version (str): OCP version (e.g., "4.18")
             doozer_working (str): Doozer working directory path
         Return Value(s):
-            set[str]: Set of valid image distgit keys
+            set[str]: Set of valid image distgit keys (e.g. "ose-console.rhel9")
         """
         if version in self._valid_images_cache:
             return self._valid_images_cache[version]
@@ -217,7 +217,7 @@ class ImagesHealthPipeline:
             '--show-base',
             '--show-non-release',
             '--short',
-            '{name}',
+            '{distgit_key}',
         ]
 
         try:

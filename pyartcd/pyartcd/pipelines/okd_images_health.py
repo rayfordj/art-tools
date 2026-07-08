@@ -185,7 +185,7 @@ class ImagesHealthPipeline:
             group_param,
             'images:print',
             '--short',
-            '{name}',
+            '{distgit_key}',
         ]
 
         try:

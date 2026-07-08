@@ -1221,6 +1221,7 @@ def images_print(runtime, short, show_non_release, only_for_payload, show_base, 
     \b
     {type} - The type of the distgit (e.g. rpms)
     {name} - The name of the distgit repository (e.g. openshift-enterprise)
+    {distgit_key} - The full distgit key including any suffix (e.g. openshift-enterprise-console.rhel9)
     {image_name} - The container registry image name (e.g. openshift3/ose-ansible)
     {image_name_short} - The container image name without the registry (e.g. ose-ansible)
     {component} - The component identified in the Dockerfile
@@ -1303,6 +1304,7 @@ def images_print(runtime, short, show_non_release, only_for_payload, show_base, 
         s = s.replace("{build}", "{component}-{version}-{release}")
         s = s.replace("{repository}", "{image}:{version}-{release}")
         s = s.replace("{namespace}", image.namespace)
+        s = s.replace("{distgit_key}", image.distgit_key)
         s = s.replace("{name}", image.name)
         s = s.replace("{image_name}", image.image_name)
         s = s.replace("{image_name_short}", image.image_name_short)
