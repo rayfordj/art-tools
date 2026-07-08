@@ -639,24 +639,24 @@ class ImagesHealthPipeline:
         # EC, release, and rebase failures are already organized by version in self.*_failures dicts
         # They use version keys like "4.18", so we need to convert to group format "openshift-4.18"
 
-        # Check if any failures exist
+        # Check if any failures exist (values are dicts per version, check they're non-empty)
         has_failures = (
             bool(version_build_failures)
-            or bool(self.ec_failures)
-            or bool(self.release_failures)
-            or bool(self.rebase_failures)
+            or any(self.ec_failures.values())
+            or any(self.release_failures.values())
+            or any(self.rebase_failures.values())
         )
 
         if not has_failures:
             await self.slack_client.say(':white_check_mark: All images are healthy for all monitored releases')
             return
 
-        # Collect all groups that have any kind of failure
+        # Collect all groups that have actual failures (skip versions with empty dicts)
         all_groups = set()
         all_groups.update(version_build_failures.keys())
-        all_groups.update(f'openshift-{v}' for v in self.ec_failures.keys())
-        all_groups.update(f'openshift-{v}' for v in self.release_failures.keys())
-        all_groups.update(f'openshift-{v}' for v in self.rebase_failures.keys())
+        all_groups.update(f'openshift-{v}' for v, f in self.ec_failures.items() if f)
+        all_groups.update(f'openshift-{v}' for v, f in self.release_failures.items() if f)
+        all_groups.update(f'openshift-{v}' for v, f in self.rebase_failures.items() if f)
 
         # Send the main alert message with just the dashboard link
         dashboard_url = ART_BUILD_FAILURES_URL
