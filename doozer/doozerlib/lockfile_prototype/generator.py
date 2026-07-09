@@ -460,6 +460,7 @@ class RpmLockfilePrototypeGenerator:
 
             reinstall_pkgs: list[str] | None = None
             strippable: set[str] | None = None
+            dockerfile_pkgs: set[str] | None = None
             if stage_num == final_stage_num and not is_update_only and has_bare_update:
                 if image_pullspec and packages:
                     # Bare update + explicit installs in final stage: reinstall
@@ -516,6 +517,7 @@ class RpmLockfilePrototypeGenerator:
                 # packages entirely rather than pinning a mismatched RPM.
                 if self._has_rhel_version_mismatch(stage_num, repo_list, distgit_key):
                     continue
+                dockerfile_pkgs = set(packages)
                 if image_pullspec:
                     reinstall_pkgs = list(packages)
                 base_pkgs = await self._get_base_image_packages(stage_num, image_pullspec, distgit_key)
@@ -545,6 +547,7 @@ class RpmLockfilePrototypeGenerator:
                 reinstall_packages=reinstall_pkgs,
                 strippable_packages=strippable,
                 stripped_tracker=stripped_tracker,
+                dockerfile_packages=dockerfile_pkgs,
             )
             if result:
                 # Any stage shape can inject base image packages (upgrade
@@ -920,6 +923,7 @@ class RpmLockfilePrototypeGenerator:
         reinstall_packages: list[str] | None = None,
         strippable_packages: set[str] | None = None,
         stripped_tracker: set[str] | None = None,
+        dockerfile_packages: set[str] | None = None,
     ) -> LockfileData | None:
         """
         Resolve a single stage, retrying after removing unavailable packages.
@@ -930,6 +934,9 @@ class RpmLockfilePrototypeGenerator:
                 added for conflict detection). If a missing package is NOT
                 in this set, it is a required Dockerfile package and the
                 error is raised immediately.
+            dockerfile_packages (set[str] | None): The original Dockerfile
+                package names (before conflict-detection extras are added).
+                Used to filter packages and upgrade targets before fallback.
 
         Return Value(s):
             LockfileData | None: Lockfile data, or None if all packages filtered out.
@@ -1046,15 +1053,26 @@ class RpmLockfilePrototypeGenerator:
             remaining_reinstall.clear()
         # Disable reinstall→upgrade promotion for the fallback — reinstall
         # packages that aren't actually installed would cause
-        # PackagesNotInstalledError from DNF if promoted. Upgrade targets
-        # (base image packages) are left as-is: _resolve_fallback's own
-        # strip-and-retry loop already handles any that turn out to be
-        # unresolvable (e.g. arch-mismatched), so there's no need to
-        # blindly drop all of them — doing so would strand packages that
-        # are both a Dockerfile package and a base image package (only
-        # reachable via upgrade, since they're excluded from reinstall
-        # above) with no way to appear in the lockfile at all.
+        # PackagesNotInstalledError from DNF if promoted.
         promote_reinstall_to_upgrade = False
+        # Drop packages and upgrade targets that are pure base-image
+        # additions (not in the Dockerfile's explicit package list).
+        # These are bulk-added for bare-update and conflict-detection
+        # and many come from repos unavailable to this image (e.g. CRB,
+        # GCC Toolset in a golang builder). Stripping them one-by-one
+        # in the fallback loop exhausts its retry budget.
+        if dockerfile_packages is not None:
+            dropped_targets = [t for t in remaining_update_targets if t not in dockerfile_packages]
+            remaining_update_targets[:] = [t for t in remaining_update_targets if t in dockerfile_packages]
+            dropped_pkgs = [p for p in remaining_packages if p not in dockerfile_packages]
+            remaining_packages[:] = [p for p in remaining_packages if p in dockerfile_packages]
+            total_dropped = len(dropped_targets) + len(dropped_pkgs)
+            if total_dropped:
+                self.logger.info(
+                    f"{distgit_key}: stage {stage_num}: dropped {total_dropped} "
+                    f"pure base-image packages/targets before fallback "
+                    f"({len(dropped_targets)} upgrade targets, {len(dropped_pkgs)} conflict-detection)"
+                )
         self.upgrades_dropped = True
 
         return await self._resolve_fallback(
@@ -1230,6 +1248,7 @@ class RpmLockfilePrototypeGenerator:
         reinstall_packages: list[str] | None = None,
         strippable_packages: set[str] | None = None,
         stripped_tracker: set[str] | None = None,
+        dockerfile_packages: set[str] | None = None,
     ) -> LockfileData | None:
         """
         Resolve a stage with cross-arch version reconciliation.
@@ -1252,6 +1271,8 @@ class RpmLockfilePrototypeGenerator:
                 reinstall from repos into the lockfile.
             strippable_packages (set[str] | None): Packages that may be
                 silently removed during retries (conflict detection packages).
+            dockerfile_packages (set[str] | None): Original Dockerfile
+                package names, used to filter before fallback.
         Return Value(s):
             LockfileData | None: Resolved lockfile with consistent
                 versions, or None if no packages remain.
@@ -1269,6 +1290,7 @@ class RpmLockfilePrototypeGenerator:
             reinstall_packages=reinstall_packages,
             strippable_packages=strippable_packages,
             stripped_tracker=stripped_tracker,
+            dockerfile_packages=dockerfile_packages,
         )
         if not first_pass:
             return None
@@ -1307,6 +1329,7 @@ class RpmLockfilePrototypeGenerator:
                 module_enable=module_enable,
                 reinstall_packages=pinned_reinstall,
                 strippable_packages=strippable_packages,
+                dockerfile_packages=dockerfile_packages,
             )
         except RuntimeError:
             self.logger.warning(
