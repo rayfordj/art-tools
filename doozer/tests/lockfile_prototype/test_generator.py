@@ -730,7 +730,7 @@ class TestRpmLockfilePrototypeGenerator(unittest.TestCase):
         # installed; the other 5 are pure base image noise that will each
         # fail resolution in turn, exhausting the main retry loop.
         failing_pkgs = [f"base-noise-{i}" for i in range(5)]
-        generator._container.get_installed_packages = AsyncMock(return_value=["python3-setuptools"] + failing_pkgs)
+        generator._container.get_installed_packages = AsyncMock(return_value=["python3-setuptools", *failing_pkgs])
 
         call_count = 0
 
@@ -754,7 +754,10 @@ class TestRpmLockfilePrototypeGenerator(unittest.TestCase):
             )
             asyncio.run(generator.generate_lockfile(meta, dest_dir))
 
-        self.assertTrue(generator.upgrades_dropped)
+        # Upgrade targets survived (python3-setuptools is still there),
+        # so upgrades_dropped must be False — the rebaser must keep the
+        # dnf update command so the resolved upgrade RPMs are applied.
+        self.assertFalse(generator.upgrades_dropped)
         # Fallback should have been reached (5 main-loop retries exhausted).
         # Some later calls are _recover_stripped_per_arch attempts for the
         # noise packages (unrelated to this assertion), so check across all
@@ -876,6 +879,40 @@ class TestRpmLockfilePrototypeGenerator(unittest.TestCase):
         # fail since it's genuinely unavailable everywhere).
         fallback_config = generator._resolver.resolve.call_args_list[1][0][0]
         self.assertEqual(fallback_config.upgradePackages, [])
+
+    def test_fallback_keeps_upgrades_when_targets_remain(self):
+        """
+        When the retry loop exhausts but upgrade targets survive the
+        stripping, upgrades_dropped must be False so the rebaser keeps
+        the dnf update command and the resolved upgrade RPMs are applied
+        at build time.
+        """
+        meta = self._make_mock_image_meta()
+        meta.config.konflux.cachi2.lockfile.get.return_value = None
+        generator = self._make_generator()
+        generator.downstream_parents = ["quay.io/test/base@sha256:abc123"]
+        # 5 bad packages exhaust the retry loop, 1 good upgrade target survives
+        failing_pkgs = [f"bad-{i}" for i in range(5)]
+        generator._container.get_installed_packages = AsyncMock(return_value=["glibc", *failing_pkgs])
+
+        async def mock_resolve(config, image_pullspec=None):
+            pkg_names = [p if isinstance(p, str) else p.name for p in (config.packages or [])]
+            pkg_names += config.reinstallPackages or []
+            pkg_names += config.upgradePackages or []
+            for pkg in failing_pkgs:
+                if pkg in pkg_names:
+                    raise RuntimeError(f"No match for argument: {pkg}")
+            return FAKE_LOCKFILE_DATA.model_copy(deep=True)
+
+        generator._resolver.resolve = AsyncMock(side_effect=mock_resolve)
+
+        with TemporaryDirectory() as tmpdir:
+            dest_dir = Path(tmpdir)
+            (dest_dir / "Dockerfile").write_text("FROM base\nRUN dnf upgrade -y && dnf install -y curl\n")
+            asyncio.run(generator.generate_lockfile(meta, dest_dir))
+
+        # glibc upgrade target survived → upgrades not dropped
+        self.assertFalse(generator.upgrades_dropped)
 
     def test_fallback_packages_used_when_image_unreachable(self):
         """
@@ -1222,8 +1259,8 @@ class TestRpmLockfilePrototypeGenerator(unittest.TestCase):
         # Dockerfile packages: git, gzip, util-linux
         # Base image packages (reinstall + strippable): git, gzip, + 5 failing base pkgs
         # "git" and "gzip" are in both — they must stay in reinstall after fallback
-        all_packages = ["git", "gzip", "util-linux"] + failing_pkgs
-        reinstall = ["git", "gzip"] + failing_pkgs
+        all_packages = ["git", "gzip", "util-linux", *failing_pkgs]
+        reinstall = ["git", "gzip", *failing_pkgs]
         strippable = set(failing_pkgs)
 
         result = asyncio.run(
@@ -1284,8 +1321,8 @@ class TestRpmLockfilePrototypeGenerator(unittest.TestCase):
         # util-linux is a Dockerfile package AND a base image package.
         # It must stay in reinstallPackages (graceful skip if missing)
         # but NOT appear in upgradePackages (throws if not installed).
-        all_packages = ["util-linux", "curl"] + failing_pkgs
-        reinstall = ["util-linux", "curl"] + failing_pkgs
+        all_packages = ["util-linux", "curl", *failing_pkgs]
+        reinstall = ["util-linux", "curl", *failing_pkgs]
         strippable = set(failing_pkgs)
 
         result = asyncio.run(
@@ -1347,13 +1384,13 @@ class TestRpmLockfilePrototypeGenerator(unittest.TestCase):
             generator._resolve_stage_with_retry(
                 repo_list=repos,
                 arches=["x86_64", "aarch64"],
-                packages=["git", "python3-six"] + failing_pkgs,
+                packages=["git", "python3-six", *failing_pkgs],
                 arch_pkgs={},
                 update_targets=["python3-six"],
                 image_pullspec="quay.io/test/base@sha256:abc123",
                 distgit_key="openshift-enterprise-tests",
                 stage_num=1,
-                reinstall_packages=["git", "python3-six"] + failing_pkgs,
+                reinstall_packages=["git", "python3-six", *failing_pkgs],
                 strippable_packages=set(failing_pkgs),
             )
         )
@@ -1402,7 +1439,7 @@ class TestRpmLockfilePrototypeGenerator(unittest.TestCase):
             generator._resolve_stage_with_retry(
                 repo_list=repos,
                 arches=["x86_64", "aarch64"],
-                packages=["git", "dmidecode"] + failing_pkgs,
+                packages=["git", "dmidecode", *failing_pkgs],
                 arch_pkgs={},
                 update_targets=[],
                 image_pullspec="quay.io/test/base@sha256:abc123",
@@ -1938,6 +1975,136 @@ class TestCrossArchReconciliation(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("python3-six", second_update_targets)
         second_packages = second_call[0][2]
         self.assertTrue(any("python3-six-1.11.0-8.el8" in p for p in second_packages))
+
+    def test_detect_partial_arch_upgrades_basic(self):
+        """
+        Upgrade target present on 1 of 4 arches is flagged as partial.
+        """
+        lockfile = self._make_lockfile(
+            {
+                "x86_64": [("libsemanage", "3.6-2.1.el9_4", "https://x86/libsemanage.rpm")],
+                "aarch64": [],
+                "ppc64le": [],
+                "s390x": [],
+            }
+        )
+        result = RpmLockfilePrototypeGenerator._detect_partial_arch_upgrades(
+            lockfile,
+            ["x86_64", "aarch64", "ppc64le", "s390x"],
+            ["libsemanage"],
+            set(),
+        )
+        self.assertEqual(result, {"libsemanage"})
+
+    def test_detect_partial_arch_upgrades_ignores_stripped(self):
+        """
+        Package already in stripped_tracker should not be flagged.
+        """
+        lockfile = self._make_lockfile(
+            {
+                "x86_64": [("dmidecode", "3.3-4.el9", "https://x86/dmidecode.rpm")],
+                "aarch64": [],
+            }
+        )
+        result = RpmLockfilePrototypeGenerator._detect_partial_arch_upgrades(
+            lockfile,
+            ["x86_64", "aarch64"],
+            ["dmidecode"],
+            {"dmidecode"},
+        )
+        self.assertEqual(result, set())
+
+    def test_detect_partial_arch_upgrades_all_arches_present(self):
+        """
+        Upgrade target present on all arches should not be flagged.
+        """
+        lockfile = self._make_lockfile(
+            {
+                "x86_64": [("curl", "7.76-2.el9", "https://x86/curl.rpm")],
+                "aarch64": [("curl", "7.76-2.el9", "https://arm/curl.rpm")],
+            }
+        )
+        result = RpmLockfilePrototypeGenerator._detect_partial_arch_upgrades(
+            lockfile,
+            ["x86_64", "aarch64"],
+            ["curl"],
+            set(),
+        )
+        self.assertEqual(result, set())
+
+    def test_detect_partial_arch_upgrades_no_update_targets(self):
+        """
+        Empty update_targets produces empty result.
+        """
+        lockfile = self._make_lockfile(
+            {
+                "x86_64": [("curl", "7.76-2.el9", "https://x86/curl.rpm")],
+                "aarch64": [],
+            }
+        )
+        result = RpmLockfilePrototypeGenerator._detect_partial_arch_upgrades(
+            lockfile,
+            ["x86_64", "aarch64"],
+            [],
+            set(),
+        )
+        self.assertEqual(result, set())
+
+    def test_detect_partial_arch_upgrades_non_upgrade_target_ignored(self):
+        """
+        Package present on only some arches but NOT an upgrade target
+        should not be flagged.
+        """
+        lockfile = self._make_lockfile(
+            {
+                "x86_64": [("custom-pkg", "1.0-1.el9", "https://x86/custom.rpm")],
+                "aarch64": [],
+            }
+        )
+        result = RpmLockfilePrototypeGenerator._detect_partial_arch_upgrades(
+            lockfile,
+            ["x86_64", "aarch64"],
+            ["other-pkg"],
+            set(),
+        )
+        self.assertEqual(result, set())
+
+    async def test_reconciliation_strips_partial_arch_upgrades(self):
+        """
+        When first pass has a partial-arch upgrade target, it should
+        be stripped before mismatch detection, preventing the package
+        from appearing in the final lockfile.
+        """
+        gen = self._make_generator()
+        first_pass = self._make_lockfile(
+            {
+                "x86_64": [
+                    ("curl", "7.76-1.el9", "https://x86/curl.rpm"),
+                    ("libsemanage", "3.6-2.1.el9_4", "https://x86/libsemanage.rpm"),
+                ],
+                "aarch64": [
+                    ("curl", "7.76-1.el9", "https://arm/curl.rpm"),
+                ],
+            }
+        )
+        gen._resolve_stage_with_retry = AsyncMock(return_value=first_pass)
+
+        result = await gen._resolve_with_reconciliation(
+            [],
+            ["x86_64", "aarch64"],
+            ["curl"],
+            {},
+            ["libsemanage"],
+            "quay.io/test/base@sha256:abc123",
+            "test-image",
+            0,
+        )
+        x86_names = {p.name for p in result.arches[0].packages}
+        arm_names = {p.name for p in result.arches[1].packages}
+        self.assertNotIn("libsemanage", x86_names)
+        self.assertIn("curl", x86_names)
+        self.assertIn("curl", arm_names)
+        gen.logger.warning.assert_called()
 
 
 class TestIsBuilddepRequirement(unittest.TestCase):
