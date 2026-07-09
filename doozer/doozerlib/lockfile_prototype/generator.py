@@ -956,8 +956,9 @@ class RpmLockfilePrototypeGenerator:
         remaining_reinstall = list(reinstall_packages) if reinstall_packages else []
         promote_reinstall_to_upgrade = strippable_packages is not None
         retries_exhausted = False
+        real_retries = 0
 
-        for _attempt in range(MAX_RESOLUTION_RETRIES):
+        while real_retries < MAX_RESOLUTION_RETRIES:
             in_yaml = self._build_resolve_config(
                 repo_list,
                 arches,
@@ -1004,6 +1005,7 @@ class RpmLockfilePrototypeGenerator:
                         remaining_reinstall,
                         arch_pkgs,
                     )
+                    real_retries += 1
                 if not removed:
                     raise
                 if stripped_tracker is not None:
@@ -1053,7 +1055,7 @@ class RpmLockfilePrototypeGenerator:
         # reachable via upgrade, since they're excluded from reinstall
         # above) with no way to appear in the lockfile at all.
         promote_reinstall_to_upgrade = False
-        self.upgrades_dropped = not remaining_update_targets
+        self.upgrades_dropped = True
 
         return await self._resolve_fallback(
             repo_list,
@@ -1214,66 +1216,6 @@ class RpmLockfilePrototypeGenerator:
             pins.append(format_version_pin(name, min_evr))
         return pins
 
-    @staticmethod
-    def _detect_partial_arch_upgrades(
-        lockfile: LockfileData,
-        arches: list[str],
-        update_targets: list[str],
-        already_stripped: set[str],
-    ) -> set[str]:
-        """
-        Detect upgrade targets that appear in the lockfile for only a
-        subset of architectures.
-
-        When an errata update is available for some arches but not others,
-        rpm-lockfile-prototype silently upgrades only the arches that have
-        the newer version. The package appears in the lockfile for those
-        arches but not the rest, causing a version mismatch in the built
-        image (upgraded arches get the lockfile version, others keep the
-        base image version).
-
-        Packages already in ``already_stripped`` are excluded — they were
-        handled by the retry/recovery path (arch-specific packages like
-        dmidecode that caused resolution errors).
-
-        Arg(s):
-            lockfile (LockfileData): Resolved lockfile with per-arch results.
-            arches (list[str]): All target architectures.
-            update_targets (list[str]): Packages that are upgrade targets.
-            already_stripped (set[str]): Packages already stripped by the
-                retry loop (handled separately by per-arch recovery).
-        Return Value(s):
-            set[str]: Package names to strip from the lockfile.
-        """
-        if len(arches) < 2 or not update_targets:
-            return set()
-
-        update_set = set(update_targets)
-        pkg_arch_count: dict[str, int] = {}
-        for arch_entry in lockfile.arches:
-            for pkg in arch_entry.packages:
-                if pkg.name and pkg.name in update_set:
-                    pkg_arch_count[pkg.name] = pkg_arch_count.get(pkg.name, 0) + 1
-
-        partial: set[str] = set()
-        for name, count in pkg_arch_count.items():
-            if count < len(arches) and name not in already_stripped:
-                partial.add(name)
-        return partial
-
-    @staticmethod
-    def _strip_packages_from_lockfile(lockfile: LockfileData, names: set[str]) -> None:
-        """
-        Remove packages by name from all architecture entries in the
-        lockfile.
-
-        Arg(s):
-            lockfile (LockfileData): Lockfile to modify in place.
-            names (set[str]): Package names to remove.
-        """
-        for arch_entry in lockfile.arches:
-            arch_entry.packages = [p for p in arch_entry.packages if p.name not in names]
-
     async def _resolve_with_reconciliation(
         self,
         repo_list: list[RepoEntry],
@@ -1331,15 +1273,6 @@ class RpmLockfilePrototypeGenerator:
         if not first_pass:
             return None
 
-        partial_arch = self._detect_partial_arch_upgrades(first_pass, arches, update_targets, stripped_tracker or set())
-        if partial_arch:
-            self.logger.warning(
-                f"{distgit_key}: stage {stage_num}: stripping {len(partial_arch)} "
-                f"partial-arch upgrade targets to prevent cross-arch version "
-                f"mismatch: {sorted(partial_arch)}"
-            )
-            self._strip_packages_from_lockfile(first_pass, partial_arch)
-
         mismatches = self._detect_cross_arch_mismatches(first_pass)
         if not mismatches:
             return first_pass
@@ -1356,8 +1289,7 @@ class RpmLockfilePrototypeGenerator:
 
         pinned_packages = list(packages) + version_pins
         pinned_names = set(mismatches.keys())
-        excluded = pinned_names | partial_arch
-        pinned_update_targets = [t for t in update_targets if t not in excluded]
+        pinned_update_targets = [t for t in update_targets if t not in pinned_names]
         pinned_reinstall = (
             [p for p in reinstall_packages if p not in pinned_names] if reinstall_packages else reinstall_packages
         )
@@ -1394,8 +1326,6 @@ class RpmLockfilePrototypeGenerator:
             )
             return first_pass
 
-        if partial_arch:
-            self._strip_packages_from_lockfile(second_pass, partial_arch)
         self.logger.info(f"{distgit_key}: stage {stage_num}: cross-arch versions reconciled successfully")
         return second_pass
 
