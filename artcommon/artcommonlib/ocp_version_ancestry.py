@@ -11,10 +11,13 @@ Key components:
 - get_previous_minor_version_from_suggestions(): Extract the previous major.minor version
   from validated build-suggestions data
 - get_cincinnati_channels(): Get Cincinnati channel names for a version
+- get_release_controller_versions_async(): Fetch promoted versions from the release controller
 - calc_upgrade_sources_async(): Calculate which versions can upgrade to a target version
 """
 
 import functools
+import logging
+import re
 from typing import Any, Optional
 
 import httpx
@@ -23,6 +26,8 @@ import yaml
 from artcommonlib.arch_util import go_arch_for_brew_arch
 from artcommonlib.util import extract_version_fields
 from pydantic import BaseModel, Field, ValidationError, field_validator, model_validator
+
+logger = logging.getLogger(__name__)
 
 
 class SuggestionsSpec(BaseModel):
@@ -344,11 +349,68 @@ def _version_in_range(version: str, v_min: str, v_max: Optional[str]) -> bool:
     return v_info.major == min_info.major and v_info.minor == min_info.minor
 
 
+async def get_release_controller_versions_async(
+    major: int,
+    minor: int,
+    go_arch: str,
+    release_controller_url: str = '',
+    timeout: float = 30.0,
+) -> list[str]:
+    """
+    Query the release controller's stable stream to get all promoted versions for a major.minor.
+
+    The release controller tracks all versions that have been promoted to the 4-stable stream,
+    regardless of whether their cincinnati-graph-data PR has merged. This supplements Cincinnati
+    data to avoid missing recently-promoted z-streams.
+
+    :param major: Major version (e.g., 4 or 5)
+    :param minor: Minor version (e.g., 18)
+    :param go_arch: Go architecture name (e.g., 'amd64', 's390x', 'arm64', 'ppc64le', 'multi')
+    :param release_controller_url: Base URL for the release controller. If empty, defaults to
+        'https://{go_arch}.ocp.releases.ci.openshift.org'.
+    :param timeout: HTTP request timeout in seconds
+    :return: List of version strings matching major.minor, sorted descending by semver
+    """
+    if not release_controller_url:
+        release_controller_url = f'https://{go_arch}.ocp.releases.ci.openshift.org'
+
+    base_url = release_controller_url.rstrip('/')
+    url = f'{base_url}/api/v1/releasestream/{major}-stable/tags'
+
+    try:
+        async with httpx.AsyncClient() as client:
+            response = await client.get(url, timeout=timeout)
+            response.raise_for_status()
+    except httpx.HTTPError as e:
+        logger.warning('Failed to query release controller at %s: %s', url, e)
+        return []
+
+    data = response.json()
+    tags = data.get('tags', [])
+
+    # Filter tags to only those matching the requested major.minor.
+    # Tag names are version strings like "4.18.3" or "4.18.0-rc.0".
+    version_pattern = re.compile(rf'^{major}\.{minor}\.')
+    versions = []
+    for tag in tags:
+        name = tag.get('name', '')
+        if version_pattern.match(name):
+            # Validate it's a proper semver string before including
+            try:
+                semver.VersionInfo.parse(name)
+                versions.append(name)
+            except ValueError:
+                continue
+
+    return sort_semver(versions)
+
+
 async def calc_upgrade_sources_async(
     version: str,
     arch: str,
     graph_url: str = 'https://api.openshift.com/api/upgrades_info/v1/graph',
     suggestions_url: str = 'https://raw.githubusercontent.com/openshift/cincinnati-graph-data/master/build-suggestions/',
+    release_controller_url: str = '',
 ) -> list[str]:
     """
     Calculate which previous release versions can upgrade to the specified version.
@@ -357,13 +419,17 @@ async def calc_upgrade_sources_async(
     1. Fetching build-suggestions to determine the previous minor version
     2. Using get_previous_minor_version_from_suggestions to extract previous version
     3. Querying Cincinnati for versions from both previous and current minor releases
-    4. Filtering based on build-suggestions constraints (minor_min/max, z_min/max, block lists)
-    5. Including eligible hotfix releases
+    4. Supplementing Cincinnati data with release controller versions (catches recently-promoted
+       z-streams whose cincinnati-graph-data PR hasn't merged yet)
+    5. Filtering based on build-suggestions constraints (minor_min/max, z_min/max, block lists)
+    6. Including eligible hotfix releases
 
     :param version: Version string (e.g., "5.0.0-rc.0")
     :param arch: Architecture (brew arch name, e.g., "x86_64")
     :param graph_url: Cincinnati API endpoint
     :param suggestions_url: Base URL to Cincinnati build-suggestions directory
+    :param release_controller_url: Base URL for the release controller. If empty, defaults to
+        'https://{go_arch}.ocp.releases.ci.openshift.org'.
     :return: Sorted list of version strings that can upgrade to the target version
     :raises IOError: If the version string cannot be parsed into major.minor fields
     :raises ValueError: If build-suggestions are invalid or previous version cannot be determined
@@ -391,6 +457,21 @@ async def calc_upgrade_sources_async(
     # STEP 4: Query Cincinnati for version lists
     prev_versions, _ = await get_channel_versions_async(prev_candidate_channel, go_arch, graph_url)
     curr_versions, current_edges = await get_channel_versions_async(candidate_channel, go_arch, graph_url)
+
+    # STEP 4.5: Supplement Cincinnati data with release controller versions.
+    # If a z-stream was promoted but its cincinnati-graph-data PR hasn't merged yet,
+    # it will be invisible to Cincinnati. The release controller tracks all promoted
+    # versions in the {major}-stable stream, so we union those in.
+    rc_prev_versions = await get_release_controller_versions_async(
+        prev_major, prev_minor, go_arch, release_controller_url
+    )
+    rc_curr_versions = await get_release_controller_versions_async(major, minor, go_arch, release_controller_url)
+
+    prev_versions_set = set(prev_versions) | set(rc_prev_versions)
+    prev_versions = sort_semver(list(prev_versions_set))
+
+    curr_versions_set = set(curr_versions) | set(rc_curr_versions)
+    curr_versions = sort_semver(list(curr_versions_set))
 
     upgrade_from = set()
 
