@@ -24,6 +24,7 @@ from doozerlib.lockfile_prototype.constants import (
     DEFAULT_RPM_LOCKFILE_NAME,
     DIGEST_PREFIX,
     DOCKERFILE_NAME,
+    MAX_REINSTALL_STRIP_RETRIES,
     MAX_RESOLUTION_RETRIES,
 )
 from doozerlib.lockfile_prototype.container_utils import ContainerImageHelper
@@ -964,6 +965,7 @@ class RpmLockfilePrototypeGenerator:
         promote_reinstall_to_upgrade = strippable_packages is not None
         retries_exhausted = False
         real_retries = 0
+        reinstall_strip_count = 0
 
         while real_retries < MAX_RESOLUTION_RETRIES:
             in_yaml = self._build_resolve_config(
@@ -1000,6 +1002,7 @@ class RpmLockfilePrototypeGenerator:
                 if reinstall_only:
                     remaining_reinstall[:] = [p for p in remaining_reinstall if p not in reinstall_only]
                     removed += len(reinstall_only)
+                    reinstall_strip_count += 1
                     self.logger.info(
                         f"{distgit_key}: stage {stage_num}: stripped from reinstall only "
                         f"(keeping in install/upgrade): {sorted(reinstall_only)}"
@@ -1013,6 +1016,7 @@ class RpmLockfilePrototypeGenerator:
                         arch_pkgs,
                     )
                     real_retries += 1
+                    reinstall_strip_count = 0
                 if not removed:
                     raise
                 if stripped_tracker is not None:
@@ -1020,6 +1024,20 @@ class RpmLockfilePrototypeGenerator:
                 self.logger.warning(
                     f"{distgit_key}: stage {stage_num}: retrying without unavailable packages: {sorted(missing)}"
                 )
+                if reinstall_strip_count >= MAX_REINSTALL_STRIP_RETRIES and remaining_reinstall:
+                    if strippable_packages is not None:
+                        droppable = [p for p in remaining_reinstall if p in strippable_packages]
+                    else:
+                        droppable = list(remaining_reinstall)
+                    if droppable:
+                        self.logger.info(
+                            f"{distgit_key}: stage {stage_num}: {reinstall_strip_count} consecutive "
+                            f"reinstall-only failures, bulk-dropping {len(droppable)} "
+                            "reinstall packages to avoid serial retries"
+                        )
+                        if stripped_tracker is not None:
+                            stripped_tracker.update(droppable)
+                        remaining_reinstall[:] = [p for p in remaining_reinstall if p not in droppable]
                 if not remaining_packages and not arch_pkgs and not remaining_reinstall:
                     self.logger.warning(
                         f"{distgit_key}: stage {stage_num}: no packages remaining after filtering, skipping"
