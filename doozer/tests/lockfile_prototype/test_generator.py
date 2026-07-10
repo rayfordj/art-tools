@@ -881,9 +881,9 @@ class TestRpmLockfilePrototypeGenerator(unittest.TestCase):
         """
         When packages fail resolution but are only in reinstallPackages
         (not in the main install list), stripping them should not count
-        toward the retry limit. This prevents bare-update images like
-        golang-builder from hitting the fallback (and losing dnf update)
-        just because several Dockerfile reinstall packages are unavailable.
+        toward the retry limit. After MAX_REINSTALL_STRIP_RETRIES
+        consecutive reinstall-only failures, remaining reinstall packages
+        are bulk-dropped to avoid serial retries.
         """
         meta = self._make_mock_image_meta()
         meta.config.konflux.cachi2.lockfile.get.return_value = None
@@ -892,11 +892,8 @@ class TestRpmLockfilePrototypeGenerator(unittest.TestCase):
         generator._container.get_installed_packages = AsyncMock(return_value=["glibc"])
 
         reinstall_failures = [f"reinstall-fail-{i}" for i in range(10)]
-        call_count = 0
 
         async def mock_resolve(config, image_pullspec=None):
-            nonlocal call_count
-            call_count += 1
             for pkg in reinstall_failures:
                 if pkg in (config.reinstallPackages or []):
                     raise RuntimeError(f"No match for argument: {pkg}")
@@ -914,6 +911,40 @@ class TestRpmLockfilePrototypeGenerator(unittest.TestCase):
         # Should NOT have hit the fallback — reinstall-only strips
         # don't count as real retries
         self.assertFalse(generator.upgrades_dropped)
+
+    def test_reinstall_bulk_drop_limits_resolve_calls(self):
+        """
+        With many unavailable reinstall packages, bulk-drop after
+        MAX_REINSTALL_STRIP_RETRIES consecutive failures should keep
+        total resolve calls low instead of stripping one at a time.
+        """
+        meta = self._make_mock_image_meta()
+        meta.config.konflux.cachi2.lockfile.get.return_value = None
+        generator = self._make_generator()
+        generator.downstream_parents = ["quay.io/test/base@sha256:abc123"]
+        generator._container.get_installed_packages = AsyncMock(return_value=["glibc"])
+
+        reinstall_failures = [f"bad-pkg-{i}" for i in range(50)]
+
+        async def mock_resolve(config, image_pullspec=None):
+            for pkg in reinstall_failures:
+                if pkg in (config.reinstallPackages or []):
+                    raise RuntimeError(f"No match for argument: {pkg}")
+            return FAKE_LOCKFILE_DATA.model_copy(deep=True)
+
+        generator._resolver.resolve = AsyncMock(side_effect=mock_resolve)
+
+        with TemporaryDirectory() as tmpdir:
+            dest_dir = Path(tmpdir)
+            (dest_dir / "Dockerfile").write_text(
+                "FROM base\nRUN dnf install -y curl " + " ".join(reinstall_failures) + "\n"
+            )
+            asyncio.run(generator.generate_lockfile(meta, dest_dir))
+
+        self.assertFalse(generator.upgrades_dropped)
+        # 5 individual strip retries + 1 success after bulk-drop + per-arch
+        # recovery attempts. Without bulk-drop this would be 51+ calls.
+        self.assertLess(generator._resolver.resolve.call_count, 15)
 
     def test_fallback_packages_used_when_image_unreachable(self):
         """
@@ -1257,11 +1288,12 @@ class TestRpmLockfilePrototypeGenerator(unittest.TestCase):
             )
         ]
 
-        # Dockerfile packages: git, gzip, util-linux
-        # Base image packages (reinstall + strippable): git, gzip, + 5 failing base pkgs
-        # "git" and "gzip" are in both — they must stay in reinstall after fallback
+        # Dockerfile packages: git, gzip, util-linux + failing conflict-detection pkgs
+        # Reinstall: only git, gzip (required). Failing pkgs NOT in reinstall
+        # so they trigger fully_missing → real_retries → fallback fires.
+        # "git" and "gzip" must stay in reinstall after fallback.
         all_packages = ["git", "gzip", "util-linux", *failing_pkgs]
-        reinstall = ["git", "gzip", *failing_pkgs]
+        reinstall = ["git", "gzip"]
         strippable = set(failing_pkgs)
 
         result = asyncio.run(
@@ -1280,15 +1312,16 @@ class TestRpmLockfilePrototypeGenerator(unittest.TestCase):
         )
 
         self.assertIsNotNone(result)
-        # 5 retries (one failing pkg each) + 1 fallback = 6 calls
+        # 5 fully_missing retries + 1 fallback = 6 calls
         self.assertEqual(call_count, 6)
         final_config = generator._resolver.resolve.call_args_list[5][0][0]
         # Required Dockerfile packages must remain in reinstallPackages
         self.assertIn("git", final_config.reinstallPackages)
         self.assertIn("gzip", final_config.reinstallPackages)
-        # Strippable packages must be gone
+        # Strippable packages must be gone from install list
+        pkg_names = [p if isinstance(p, str) else p.name for p in final_config.packages]
         for pkg in failing_pkgs:
-            self.assertNotIn(pkg, final_config.reinstallPackages)
+            self.assertNotIn(pkg, pkg_names)
 
     def test_fallback_disables_reinstall_to_upgrade_promotion(self):
         """
@@ -1381,6 +1414,8 @@ class TestRpmLockfilePrototypeGenerator(unittest.TestCase):
 
         # python3-six is a Dockerfile update target AND a base image package.
         # It must NOT be strippable — it must survive the fallback in reinstall.
+        # Failing pkgs are NOT in reinstall so they trigger fully_missing →
+        # real_retries → fallback fires.
         result = asyncio.run(
             generator._resolve_stage_with_retry(
                 repo_list=repos,
@@ -1391,7 +1426,7 @@ class TestRpmLockfilePrototypeGenerator(unittest.TestCase):
                 image_pullspec="quay.io/test/base@sha256:abc123",
                 distgit_key="openshift-enterprise-tests",
                 stage_num=1,
-                reinstall_packages=["git", "python3-six", *failing_pkgs],
+                reinstall_packages=["git", "python3-six"],
                 strippable_packages=set(failing_pkgs),
             )
         )
@@ -1402,8 +1437,6 @@ class TestRpmLockfilePrototypeGenerator(unittest.TestCase):
         # python3-six must stay in reinstallPackages (not strippable)
         self.assertIn("python3-six", final_config.reinstallPackages)
         self.assertIn("git", final_config.reinstallPackages)
-        for pkg in failing_pkgs:
-            self.assertNotIn(pkg, final_config.reinstallPackages)
 
     def test_fallback_strips_newly_discovered_missing_package(self):
         """
