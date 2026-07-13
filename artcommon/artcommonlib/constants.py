@@ -150,6 +150,7 @@ OCP_RPA_KINDS = {
     "image": "ocp-art-advisory",
     "metadata": "ocp-art-advisory",
     "extras": "ocp-art-advisory",
+    "microshift-bootc": "ocp-art-advisory",
 }
 OCP_RPA_ENVS = ["stage", "prod"]
 
