@@ -396,27 +396,38 @@ class UpdateGolangPipeline:
                     self.verify_golang_builder_repo(el_v, go_version)
 
             # Rebase and build missing images
-            build_tasks = []
+            build_targets = []  # list of (label, coroutine)
             if self.build_system in ['both', 'brew'] and brew_missing:
-                build_tasks.extend(
-                    [
-                        self._rebase_and_build_brew(el_v, go_version, el_nvr_map_for_images[el_v])
-                        for el_v in brew_missing
-                    ]
+                build_targets.extend(
+                    (
+                        f"RHEL {el_v} (brew)",
+                        self._rebase_and_build_brew(el_v, go_version, el_nvr_map_for_images[el_v]),
+                    )
+                    for el_v in sorted(brew_missing)
                 )
             if self.build_system in ['both', 'konflux'] and konflux_missing:
-                build_tasks.extend(
-                    [
-                        self._rebase_and_build_konflux(el_v, go_version, el_nvr_map_for_images[el_v])
-                        for el_v in konflux_missing
-                    ]
+                build_targets.extend(
+                    (
+                        f"RHEL {el_v} (konflux)",
+                        self._rebase_and_build_konflux(el_v, go_version, el_nvr_map_for_images[el_v]),
+                    )
+                    for el_v in sorted(konflux_missing)
                 )
-            if build_tasks:
-                results = await asyncio.gather(*build_tasks, return_exceptions=True)
-            errors = [r for r in results if isinstance(r, Exception)]
-            if errors:
-                error_msgs = "\n".join([str(e) for e in errors])
-                raise RuntimeError(f"{len(errors)} image build(s) failed:\n{error_msgs}")
+            if build_targets:
+                labels, coros = zip(*build_targets)
+                results = await asyncio.gather(*coros, return_exceptions=True)
+                succeeded = [label for label, r in zip(labels, results) if not isinstance(r, Exception)]
+                failed = [(label, r) for label, r in zip(labels, results) if isinstance(r, Exception)]
+
+                summary = "\n".join(
+                    ["Image build summary:"]
+                    + [f"  ✅ {label}: succeeded" for label in succeeded]
+                    + [f"  ❌ {label}: FAILED - {err}" for label, err in failed]
+                )
+                _LOGGER.info(summary)
+
+                if failed:
+                    raise RuntimeError(f"{len(failed)}/{len(build_targets)} image build(s) failed:\n{summary}")
 
             # Now all builders should be available, fetch again
             if self.build_system in ['both', 'brew']:
