@@ -1128,7 +1128,7 @@ class ImageMetadata(Metadata):
         Checks in order:
             1. Image config: konflux.cachi2.lockfile.backend
             2. Group config: konflux.cachi2.lockfile.backend
-            3. Default: "art-internal"
+            3. Default: "rpm-lockfile-prototype"
 
         Return Value(s):
             str: The lockfile backend name.
@@ -1136,7 +1136,7 @@ class ImageMetadata(Metadata):
         image_backend = self.config.konflux.cachi2.lockfile.get("backend")
         group_backend = self.runtime.group_config.konflux.cachi2.lockfile.get("backend")
 
-        backend = image_backend or group_backend or "art-internal"
+        backend = image_backend or group_backend or "rpm-lockfile-prototype"
 
         self.logger.info(f"Lockfile backend: {backend}")
         return backend
