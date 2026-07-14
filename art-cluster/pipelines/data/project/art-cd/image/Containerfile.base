@@ -16,8 +16,11 @@ RUN curl -LsSf https://astral.sh/uv/install.sh | UV_INSTALL_DIR=/usr/local/bin s
 ENV PATH="/usr/local/bin:$PATH"
 
 # Install necessary packages and Python libraries
+# python3-dnf is included so that the system python3 (RHEL 9's default
+# interpreter, distinct from python3.11 below) can resolve RPMs; see the
+# rpm-lockfile-prototype install step further down for why this matters.
 RUN dnf -y install python3.11 python3.11-pip python3.11-wheel python3.11-devel gcc krb5-devel wget tar gzip git krb5-workstation \
-    brewkoji rhpkg podman python3-rpm \
+    brewkoji rhpkg podman python3-rpm python3-pip python3-dnf \
     && uv pip install --system --upgrade setuptools \
     && dnf clean all
 
@@ -73,6 +76,17 @@ RUN uv pip install --python 3.11 --system setuptools==70.0.0
 
 # Install all art-tools packages in editable mode from the root pyproject.toml
 RUN uv pip install --python 3.11 --system -e .
+
+# doozer's RpmResolver (doozer/doozerlib/lockfile_prototype/resolver.py) shells
+# out to the system python3 (/usr/bin/python3) instead of the python3.11
+# interpreter above, because python3-dnf's compiled bindings are only
+# importable from the system Python. Install the same rpm-lockfile-prototype
+# revision pinned in uv.lock into that interpreter too, so the subprocess call
+# doesn't fail with "ModuleNotFoundError: No module named 'rpm_lockfile'".
+RUN LOCKFILE_REV=$(grep -A2 '^name = "rpm-lockfile-prototype"' uv.lock | grep 'source = ' | sed -n 's/.*#\([0-9a-f]\{40\}\).*/\1/p') \
+    && test -n "$LOCKFILE_REV" \
+    && /usr/bin/python3 -m pip install --no-cache-dir \
+       "rpm-lockfile-prototype @ git+https://github.com/konflux-ci/rpm-lockfile-prototype@${LOCKFILE_REV}"
 
 # Install check-payload tool for FIPS scanning, and copy to a location in PATH
 RUN git clone https://github.com/openshift/check-payload check-payload &&  \
