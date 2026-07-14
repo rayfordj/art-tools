@@ -16,11 +16,13 @@ RUN curl -LsSf https://astral.sh/uv/install.sh | UV_INSTALL_DIR=/usr/local/bin s
 ENV PATH="/usr/local/bin:$PATH"
 
 # Install necessary packages and Python libraries
-# python3-dnf is included so that the system python3 (RHEL 9's default
-# interpreter, distinct from python3.11 below) can resolve RPMs; see the
+# python3-dnf and skopeo are included for the system python3 (RHEL 9's
+# default interpreter, distinct from python3.11 below); see the
 # rpm-lockfile-prototype install step further down for why this matters.
+# rpm-lockfile-prototype shells out to skopeo to copy a base image's rootfs
+# locally so it can inspect the RPM DB there.
 RUN dnf -y install python3.11 python3.11-pip python3.11-wheel python3.11-devel gcc krb5-devel wget tar gzip git krb5-workstation \
-    brewkoji rhpkg podman python3-rpm python3-pip python3-dnf \
+    brewkoji rhpkg podman skopeo python3-rpm python3-pip python3-dnf \
     && uv pip install --system --upgrade setuptools \
     && dnf clean all
 
