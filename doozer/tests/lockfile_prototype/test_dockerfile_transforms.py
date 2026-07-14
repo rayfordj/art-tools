@@ -4,6 +4,7 @@ from tempfile import TemporaryDirectory
 
 from doozerlib.lockfile_prototype.dockerfile_transforms import (
     fix_rpm_verify_commands,
+    rewrite_reinstall_commands,
     strip_bare_updates,
     strip_bare_updates_from_scripts,
 )
@@ -142,6 +143,60 @@ class TestStripBareUpdatesFromScripts(unittest.TestCase):
             strip_bare_updates_from_scripts(dest)
             mtime_after = script.stat().st_mtime_ns
             self.assertEqual(mtime_before, mtime_after)
+
+
+class TestRewriteReinstallCommands(unittest.TestCase):
+    def test_rewrites_microdnf_reinstall(self):
+        content = "RUN microdnf -y reinstall tzdata && microdnf clean all\n"
+        result = rewrite_reinstall_commands(content)
+        self.assertIn("rpm -e --justdb --nodeps tzdata", result)
+        self.assertIn("microdnf -y install tzdata", result)
+        self.assertNotIn("reinstall", result)
+        self.assertIn("microdnf clean all", result)
+
+    def test_rewrites_dnf_reinstall(self):
+        content = "RUN dnf -y reinstall tzdata && dnf clean all\n"
+        result = rewrite_reinstall_commands(content)
+        self.assertIn("rpm -e --justdb --nodeps tzdata", result)
+        self.assertIn("dnf -y install tzdata", result)
+        self.assertNotIn("reinstall", result)
+
+    def test_rewrites_yum_reinstall_flag_after_action(self):
+        content = "RUN yum reinstall -y glibc && yum clean all\n"
+        result = rewrite_reinstall_commands(content)
+        self.assertIn("rpm -e --justdb --nodeps glibc", result)
+        self.assertIn("install glibc", result)
+        self.assertNotIn("reinstall", result)
+
+    def test_rewrites_multiple_packages(self):
+        content = "RUN microdnf -y reinstall tzdata glibc && microdnf clean all\n"
+        result = rewrite_reinstall_commands(content)
+        self.assertIn("rpm -e --justdb --nodeps tzdata glibc", result)
+        self.assertIn("microdnf -y install tzdata glibc", result)
+
+    def test_preserves_install_commands(self):
+        content = "RUN microdnf -y install openssl && microdnf clean all\n"
+        result = rewrite_reinstall_commands(content)
+        self.assertEqual(result, content)
+
+    def test_no_reinstall_unchanged(self):
+        content = "FROM base\nRUN yum install -y wget\n"
+        result = rewrite_reinstall_commands(content)
+        self.assertEqual(result, content)
+
+    def test_real_world_oadp_pattern(self):
+        content = (
+            "RUN . /cachi2/cachi2.env && "
+            "    microdnf -y install openssl && "
+            "microdnf -y reinstall tzdata && "
+            "microdnf clean all\n"
+        )
+        result = rewrite_reinstall_commands(content)
+        self.assertIn("microdnf -y install openssl", result)
+        self.assertIn("rpm -e --justdb --nodeps tzdata", result)
+        self.assertIn("microdnf -y install tzdata", result)
+        self.assertNotIn("reinstall", result)
+        self.assertIn("microdnf clean all", result)
 
 
 class TestFixRpmVerifyCommands(unittest.TestCase):

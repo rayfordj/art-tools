@@ -1967,8 +1967,10 @@ class TestRpmLockfilePrototypeGenerator(unittest.TestCase):
         """
         Packages explicitly reinstalled in the Dockerfile (e.g.
         ``microdnf -y reinstall tzdata``) must appear in the lockfile's
-        reinstallPackages so cachi2 pre-fetches them and the hermetic
-        build can execute the reinstall at build time.
+        install packages (not reinstallPackages) so cachi2 pre-fetches
+        them at whatever repo version is available. The Dockerfile
+        transform converts ``reinstall`` into a rpmdb-remove + install
+        sequence at build time.
         """
         meta = self._make_mock_image_meta()
         meta.config.konflux.cachi2.lockfile.get.return_value = None
@@ -1993,9 +1995,9 @@ class TestRpmLockfilePrototypeGenerator(unittest.TestCase):
 
         self.assertGreaterEqual(len(captured_configs), 1)
         main_config = captured_configs[0]
-        self.assertIn("tzdata", main_config.reinstallPackages)
         pkg_names = [p if isinstance(p, str) else p.name for p in main_config.packages]
         self.assertIn("openssl", pkg_names)
+        self.assertIn("tzdata", pkg_names)
 
 
 class TestDetermineStagePullspec(unittest.IsolatedAsyncioTestCase):

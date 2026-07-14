@@ -58,6 +58,48 @@ def strip_bare_updates_from_scripts(
                 logger.debug(f"Stripped bare updates from {script.relative_to(dest_dir)}")
 
 
+def rewrite_reinstall_commands(df_content: str) -> str:
+    """
+    Transform microdnf/dnf/yum reinstall commands into a two-step
+    rpmdb-remove + install sequence.
+
+    In hermetic builds ``reinstall`` fails when the exact installed
+    NEVRA is not available in the lockfile repos (common when the repo
+    has a newer version than the base image). The transform converts::
+
+        microdnf -y reinstall tzdata
+
+    into::
+
+        rpm -e --justdb --nodeps tzdata && microdnf -y install tzdata
+
+    ``rpm -e --justdb`` removes the package from the rpmdb **without
+    deleting files**, then the install sees it as missing and
+    re-extracts the full RPM payload from the lockfile-cached version.
+
+    Arg(s):
+        df_content (str): Raw Dockerfile text.
+    Return Value(s):
+        str: Transformed Dockerfile text with reinstall commands rewritten.
+    """
+    reinstall_re = re.compile(
+        r"\b(microdnf|dnf|yum)"  # group 1: package manager
+        r"((?:\s+-\w+)*)"  # group 2: pre-reinstall flags
+        r"\s+reinstall"  # literal reinstall action
+        r"((?:\s+-\w+)*)"  # group 3: post-reinstall flags
+        r"((?:\s+[^\s&|;\\-][^\s&|;\\]*)+)",  # group 4: package names
+    )
+
+    def _replace(m: re.Match) -> str:
+        pkgmgr = m.group(1)
+        flags = (m.group(2) + m.group(3)).strip()
+        flags_str = f" {flags}" if flags else ""
+        pkgs = m.group(4).strip()
+        return f"rpm -e --justdb --nodeps {pkgs} && {pkgmgr}{flags_str} install {pkgs}"
+
+    return reinstall_re.sub(_replace, df_content)
+
+
 def fix_rpm_verify_commands(df_content: str) -> str:
     """
     Transform rpm -V commands in Dockerfile RUN instructions so that

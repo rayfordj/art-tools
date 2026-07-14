@@ -543,12 +543,12 @@ class RpmLockfilePrototypeGenerator:
                         )
 
             if stage_info.reinstall_packages:
-                df_reinstall = [p for p in stage_info.reinstall_packages if p not in (reinstall_pkgs or [])]
+                df_reinstall = [p for p in stage_info.reinstall_packages if p not in packages]
                 if df_reinstall:
-                    reinstall_pkgs = (reinstall_pkgs or []) + df_reinstall
+                    packages = list(packages) + df_reinstall
                     self.logger.info(
                         f"{distgit_key}: stage {stage_num}: {len(df_reinstall)} Dockerfile "
-                        "reinstall packages added to lockfile reinstallPackages"
+                        "reinstall packages added to install list"
                     )
 
             enable_only = [s.split("/")[0] for s in stage_info.module_specs] if stage_info.module_specs else None

@@ -13,6 +13,7 @@ import yaml
 
 from doozerlib.lockfile_prototype.constants import DEFAULT_RPM_LOCKFILE_NAME
 from doozerlib.lockfile_prototype.dockerfile_transforms import (
+    rewrite_reinstall_commands,
     strip_bare_updates,
     strip_bare_updates_from_scripts,
 )
@@ -103,12 +104,12 @@ def apply_dockerfile_transforms(
     logger: logging.Logger | None = None,
 ) -> None:
     """
-    Strip Dockerfile commands that fail in hermetic builds.
+    Transform Dockerfile commands for hermetic builds.
 
     Applied after lockfile generation so update targets are already
     resolved into the lockfile. Removes bare yum/dnf update commands
-    and reinstall commands (redundant when the base image already has
-    the pinned version).
+    and rewrites reinstall commands into rpmdb-remove + install
+    sequences that work regardless of base image EVR.
 
     Arg(s):
         dest_dir (Path): Build directory containing the Dockerfile.
@@ -125,4 +126,5 @@ def apply_dockerfile_transforms(
     if strip_updates:
         df_content = strip_bare_updates(df_content)
         strip_bare_updates_from_scripts(dest_dir, logger=_logger)
+    df_content = rewrite_reinstall_commands(df_content)
     df_path.write_text(df_content)
