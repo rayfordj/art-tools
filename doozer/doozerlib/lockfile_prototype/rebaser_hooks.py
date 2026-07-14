@@ -15,7 +15,6 @@ from doozerlib.lockfile_prototype.constants import DEFAULT_RPM_LOCKFILE_NAME
 from doozerlib.lockfile_prototype.dockerfile_transforms import (
     strip_bare_updates,
     strip_bare_updates_from_scripts,
-    strip_reinstall_commands,
 )
 from doozerlib.lockfile_prototype.generator import RpmLockfilePrototypeGenerator
 from doozerlib.lockfile_prototype.resolver import RpmResolver
@@ -126,5 +125,4 @@ def apply_dockerfile_transforms(
     if strip_updates:
         df_content = strip_bare_updates(df_content)
         strip_bare_updates_from_scripts(dest_dir, logger=_logger)
-    df_content = strip_reinstall_commands(df_content)
     df_path.write_text(df_content)

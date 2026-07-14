@@ -30,6 +30,7 @@ class _WalkContext(BaseModel):
     packages: set[str] = Field(default_factory=set)
     arch_packages: dict[str, set[str]] = Field(default_factory=dict)
     update_targets: set[str] = Field(default_factory=set)
+    reinstall_packages: set[str] = Field(default_factory=set)
     has_update: bool = False
     builddep_packages: set[str] = Field(default_factory=set)
     module_specs: set[str] = Field(default_factory=set)
@@ -379,6 +380,8 @@ def _detect_pkg_action(word_values: list[str], ctx: _WalkContext) -> tuple[str |
         wl = w.lower()
         if wl == "install":
             return "install", idx
+        if wl == "reinstall":
+            return "reinstall", idx
         if wl in ("update", "upgrade"):
             ctx.has_update = True
             return "update", idx
@@ -476,6 +479,10 @@ def _classify_package_tokens(
         if not _is_valid_package_token(token):
             continue
         if token in arch_resolved_tokens:
+            continue
+
+        if action == "reinstall":
+            ctx.reinstall_packages.add(token)
             continue
 
         if action == "update":
@@ -593,7 +600,7 @@ def _extract_subshell_packages(subshell_body: str) -> str:
 def _parse_and_walk(
     run_values: list[str],
     env_vars: dict[str, str] | None = None,
-) -> tuple[set[str], dict[str, set[str]], set[str], bool, set[str], set[str]]:
+) -> tuple[set[str], dict[str, set[str]], set[str], bool, set[str], set[str], set[str]]:
     """
     Single pass: preprocess, parse with bashlex, and walk all RUN bodies.
 
@@ -601,13 +608,14 @@ def _parse_and_walk(
         run_values (list[str]): RUN command bodies.
         env_vars (dict[str, str] | None): Variables from ARG/ENV directives.
     Return Value(s):
-        tuple[set[str], dict[str, set[str]], set[str], bool, set[str], set[str]]:
+        tuple[set[str], dict[str, set[str]], set[str], bool, set[str], set[str], set[str]]:
             - Install packages (common to all arches).
             - Arch-specific install packages.
             - Update target packages.
             - Whether any update command was found.
             - Builddep package patterns.
             - Module specs (e.g., nodejs:18, nodejs:18/development).
+            - Reinstall packages.
     """
     logger = logging.getLogger(__name__)
     ctx = _WalkContext(variables=dict(env_vars or {}))
@@ -624,32 +632,41 @@ def _parse_and_walk(
         ctx.arch_shell_vars = {}
         _walk_nodes(ast_nodes, ctx)
 
-    return ctx.packages, ctx.arch_packages, ctx.update_targets, ctx.has_update, ctx.builddep_packages, ctx.module_specs
+    return (
+        ctx.packages,
+        ctx.arch_packages,
+        ctx.update_targets,
+        ctx.has_update,
+        ctx.builddep_packages,
+        ctx.module_specs,
+        ctx.reinstall_packages,
+    )
 
 
 def analyze_run_commands(
     run_values: list[str],
     env_vars: dict[str, str] | None = None,
-) -> tuple[list[str], dict[str, list[str]], list[str], bool, list[str], list[str]]:
+) -> tuple[list[str], dict[str, list[str]], list[str], bool, list[str], list[str], list[str]]:
     """
     Single-pass analysis of RUN command bodies. Returns all install
     packages, arch-specific packages, update targets, update flag,
-    builddep package patterns, and module specs.
+    builddep package patterns, module specs, and reinstall packages.
 
     Arg(s):
         run_values (list[str]): RUN command bodies.
         env_vars (dict[str, str] | None): Variables from ARG/ENV directives.
     Return Value(s):
-        tuple[list[str], dict[str, list[str]], list[str], bool, list[str], list[str]]:
+        tuple[list[str], dict[str, list[str]], list[str], bool, list[str], list[str], list[str]]:
             - Sorted common package names.
             - Dict mapping arch to sorted package names.
             - Sorted update target package names.
             - Whether any update command was found.
             - Sorted builddep package patterns.
             - Sorted module specs.
+            - Sorted reinstall package names.
     """
-    packages, arch_packages, update_targets, found_update, builddep_packages, module_specs = _parse_and_walk(
-        run_values, env_vars
+    packages, arch_packages, update_targets, found_update, builddep_packages, module_specs, reinstall_packages = (
+        _parse_and_walk(run_values, env_vars)
     )
     arch_result = {arch: sorted(pkgs) for arch, pkgs in sorted(arch_packages.items())}
     return (
@@ -659,6 +676,7 @@ def analyze_run_commands(
         found_update,
         sorted(builddep_packages),
         sorted(module_specs),
+        sorted(reinstall_packages),
     )
 
 
@@ -677,6 +695,6 @@ def extract_packages_from_run_commands(
             - Sorted unique list of common package names (all arches).
             - Dict mapping arch to sorted unique package names for that arch only.
     """
-    packages, arch_packages, _, _, _, _ = _parse_and_walk(run_values, env_vars)
+    packages, arch_packages, _, _, _, _, _ = _parse_and_walk(run_values, env_vars)
     arch_result = {arch: sorted(pkgs) for arch, pkgs in sorted(arch_packages.items())}
     return sorted(packages), arch_result

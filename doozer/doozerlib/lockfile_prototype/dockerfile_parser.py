@@ -314,6 +314,7 @@ def extract_packages_from_scripts(
     copy_map = copy_map or {}
     all_packages: set[str] = set()
     all_updates: set[str] = set()
+    all_reinstall: set[str] = set()
     all_arch_packages: dict[str, set[str]] = {}
     all_builddep: set[str] = set()
     all_modules: set[str] = set()
@@ -372,13 +373,14 @@ def extract_packages_from_scripts(
                     joined_lines.append(stripped)
             script_body = "\n".join(line for line in joined_lines if line.strip())
 
-            pkgs, script_arch_pkgs, updates, has_update, script_builddep, script_modules = analyze_run_commands(
-                [script_body]
+            pkgs, script_arch_pkgs, updates, has_update, script_builddep, script_modules, script_reinstall = (
+                analyze_run_commands([script_body])
             )
             all_packages.update(pkgs)
             for arch, arch_pkgs in script_arch_pkgs.items():
                 all_arch_packages.setdefault(arch, set()).update(arch_pkgs)
             all_updates.update(updates)
+            all_reinstall.update(script_reinstall)
             all_builddep.update(script_builddep)
             all_modules.update(script_modules)
             if has_update:
@@ -396,6 +398,7 @@ def extract_packages_from_scripts(
         has_update=scripts_have_bare_update,
         arch_packages={arch: sorted(pkgs) for arch, pkgs in sorted(all_arch_packages.items())},
         update_targets=sorted(all_updates),
+        reinstall_packages=sorted(all_reinstall),
         builddep_packages=sorted(all_builddep),
         module_specs=sorted(all_modules),
     )
@@ -457,7 +460,7 @@ def analyze_dockerfile_stages(
         stage_vars = collect_stage_vars(stage_entries, inherited_vars=global_args)
         run_values = [e["value"] for e in stage_entries if e["instruction"] == "RUN"]
 
-        common, arch_specific, update_targets, has_update, builddep, modules = analyze_run_commands(
+        common, arch_specific, update_targets, has_update, builddep, modules, reinstall = analyze_run_commands(
             run_values, env_vars=stage_vars
         )
         stage = StageInfo(
@@ -465,6 +468,7 @@ def analyze_dockerfile_stages(
             has_update=has_update,
             arch_packages=arch_specific,
             update_targets=update_targets,
+            reinstall_packages=reinstall,
             builddep_packages=builddep,
             module_specs=modules,
         )

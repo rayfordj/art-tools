@@ -58,31 +58,6 @@ def strip_bare_updates_from_scripts(
                 logger.debug(f"Stripped bare updates from {script.relative_to(dest_dir)}")
 
 
-def strip_reinstall_commands(df_content: str) -> str:
-    """
-    Remove microdnf/dnf/yum reinstall commands from a Dockerfile.
-
-    In hermetic builds the base image packages are already at the exact
-    pinned version, so reinstalling them is redundant. The reinstall also
-    fails because the installed NEVRA is not available in the lockfile
-    repos (e.g. ``microdnf -y reinstall tzdata`` fails with
-    "Installed package tzdata-... not available").
-
-    Strips ``reinstall`` subcommands (with their package arguments) from
-    chained commands while preserving the rest of the chain.
-
-    Arg(s):
-        df_content (str): Raw Dockerfile text.
-    Return Value(s):
-        str: Transformed Dockerfile text with reinstall commands removed.
-    """
-    reinstall_re = re.compile(
-        r"\b(?:microdnf|dnf|yum)\s+(?:-\w+\s+)*reinstall\b[^&|;\\]*(?:\\\n[^&|;\\]*)*"
-        r"(?:\s*&&\s*|\s*;\s*)?",
-    )
-    return reinstall_re.sub("", df_content)
-
-
 def fix_rpm_verify_commands(df_content: str) -> str:
     """
     Transform rpm -V commands in Dockerfile RUN instructions so that

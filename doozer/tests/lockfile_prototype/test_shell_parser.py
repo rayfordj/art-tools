@@ -549,49 +549,49 @@ class TestListArchConditional(unittest.TestCase):
 class TestBuilddepParsing(unittest.TestCase):
     def test_simple_builddep(self):
         run_values = ["dnf builddep -y pkcs11-helper*"]
-        _, _, _, _, builddep, _ = analyze_run_commands(run_values)
+        _, _, _, _, builddep, _, _ = analyze_run_commands(run_values)
         self.assertEqual(builddep, ["pkcs11-helper*"])
 
     def test_builddep_with_flags(self):
         run_values = ["dnf builddep -y --skip-broken --nobest openvpn*"]
-        _, _, _, _, builddep, _ = analyze_run_commands(run_values)
+        _, _, _, _, builddep, _, _ = analyze_run_commands(run_values)
         self.assertEqual(builddep, ["openvpn*"])
 
     def test_builddep_multiple_patterns(self):
         run_values = ["dnf builddep -y pkcs11-helper* && dnf builddep -y openvpn*"]
-        _, _, _, _, builddep, _ = analyze_run_commands(run_values)
+        _, _, _, _, builddep, _, _ = analyze_run_commands(run_values)
         self.assertEqual(builddep, ["openvpn*", "pkcs11-helper*"])
 
     def test_builddep_does_not_interfere_with_install(self):
         run_values = ["dnf install -y gcc make && dnf builddep -y pkcs11-helper*"]
-        common, arch, _, _, builddep, _ = analyze_run_commands(run_values)
+        common, arch, _, _, builddep, _, _ = analyze_run_commands(run_values)
         self.assertEqual(common, ["gcc", "make"])
         self.assertEqual(arch, {})
         self.assertEqual(builddep, ["pkcs11-helper*"])
 
     def test_builddep_without_glob(self):
         run_values = ["dnf builddep -y pkcs11-helper"]
-        _, _, _, _, builddep, _ = analyze_run_commands(run_values)
+        _, _, _, _, builddep, _, _ = analyze_run_commands(run_values)
         self.assertEqual(builddep, ["pkcs11-helper"])
 
     def test_yum_builddep(self):
         run_values = ["yum builddep -y mypackage"]
-        _, _, _, _, builddep, _ = analyze_run_commands(run_values)
+        _, _, _, _, builddep, _, _ = analyze_run_commands(run_values)
         self.assertEqual(builddep, ["mypackage"])
 
     def test_builddep_spec_file(self):
         run_values = ["dnf builddep -y mypackage.spec"]
-        _, _, _, _, builddep, _ = analyze_run_commands(run_values)
+        _, _, _, _, builddep, _, _ = analyze_run_commands(run_values)
         self.assertEqual(builddep, ["mypackage.spec"])
 
     def test_build_dep_hyphenated(self):
         run_values = ["dnf build-dep tuned.spec -y"]
-        _, _, _, _, builddep, _ = analyze_run_commands(run_values)
+        _, _, _, _, builddep, _, _ = analyze_run_commands(run_values)
         self.assertEqual(builddep, ["tuned.spec"])
 
     def test_build_dep_hyphenated_with_install(self):
         run_values = ["dnf install -y gcc rpm-build && cd assets/tuned/daemon && dnf build-dep tuned.spec -y"]
-        common, _, _, _, builddep, _ = analyze_run_commands(run_values)
+        common, _, _, _, builddep, _, _ = analyze_run_commands(run_values)
         self.assertIn("gcc", common)
         self.assertEqual(builddep, ["tuned.spec"])
 
@@ -599,33 +599,33 @@ class TestBuilddepParsing(unittest.TestCase):
 class TestModuleParsing(unittest.TestCase):
     def test_module_install(self):
         run_values = ["dnf module install -y nodejs:18/development"]
-        _, _, _, _, _, modules = analyze_run_commands(run_values)
+        _, _, _, _, _, modules, _ = analyze_run_commands(run_values)
         self.assertEqual(modules, ["nodejs:18/development"])
 
     def test_module_enable(self):
         run_values = ["dnf module enable -y nodejs:18"]
-        _, _, _, _, _, modules = analyze_run_commands(run_values)
+        _, _, _, _, _, modules, _ = analyze_run_commands(run_values)
         self.assertEqual(modules, ["nodejs:18"])
 
     def test_module_with_install_does_not_interfere(self):
         run_values = ["dnf -y install gcc && dnf module install -y nodejs:18/development"]
-        common, _, _, _, _, modules = analyze_run_commands(run_values)
+        common, _, _, _, _, modules, _ = analyze_run_commands(run_values)
         self.assertEqual(common, ["gcc"])
         self.assertEqual(modules, ["nodejs:18/development"])
 
     def test_module_multiple(self):
         run_values = ["dnf module enable -y nodejs:18 python36:3.6"]
-        _, _, _, _, _, modules = analyze_run_commands(run_values)
+        _, _, _, _, _, modules, _ = analyze_run_commands(run_values)
         self.assertEqual(modules, ["nodejs:18", "python36:3.6"])
 
     def test_module_without_stream_ignored(self):
         run_values = ["dnf module enable -y nodejs"]
-        _, _, _, _, _, modules = analyze_run_commands(run_values)
+        _, _, _, _, _, modules, _ = analyze_run_commands(run_values)
         self.assertEqual(modules, [])
 
     def test_variable_package_manager(self):
         run_values = ["${DNF} install -y openssh-clients"]
-        pkgs, _, _, _, _, _ = analyze_run_commands(run_values, env_vars={"DNF": "microdnf"})
+        pkgs, _, _, _, _, _, _ = analyze_run_commands(run_values, env_vars={"DNF": "microdnf"})
         self.assertEqual(pkgs, ["openssh-clients"])
 
     def test_variable_package_manager_in_conditional(self):
@@ -633,7 +633,7 @@ class TestModuleParsing(unittest.TestCase):
             "if ! rpm -q openssh-clients; then ${DNF} install -y openssh-clients "
             "&& ${DNF} clean all && rm -rf /var/cache/dnf/*; fi"
         ]
-        pkgs, _, _, _, _, _ = analyze_run_commands(run_values, env_vars={"DNF": "microdnf"})
+        pkgs, _, _, _, _, _, _ = analyze_run_commands(run_values, env_vars={"DNF": "microdnf"})
         self.assertEqual(pkgs, ["openssh-clients"])
 
     def test_variable_package_manager_multiple_commands(self):
@@ -642,5 +642,49 @@ class TestModuleParsing(unittest.TestCase):
             "if ! rpm -q libvirt-libs; then ${DNF} install -y libvirt-libs && ${DNF} clean all; fi",
             "if ! command -v tar; then ${DNF} install -y tar && ${DNF} clean all; fi",
         ]
-        pkgs, _, _, _, _, _ = analyze_run_commands(run_values, env_vars={"DNF": "microdnf"})
+        pkgs, _, _, _, _, _, _ = analyze_run_commands(run_values, env_vars={"DNF": "microdnf"})
         self.assertEqual(pkgs, ["libvirt-libs", "openssh-clients", "tar"])
+
+
+class TestReinstallParsing(unittest.TestCase):
+    def test_microdnf_reinstall_tzdata(self):
+        run_values = ["microdnf -y reinstall tzdata && microdnf clean all"]
+        _, _, _, _, _, _, reinstall = analyze_run_commands(run_values)
+        self.assertEqual(reinstall, ["tzdata"])
+
+    def test_dnf_reinstall_tzdata(self):
+        run_values = ["dnf -y reinstall tzdata && dnf clean all"]
+        _, _, _, _, _, _, reinstall = analyze_run_commands(run_values)
+        self.assertEqual(reinstall, ["tzdata"])
+
+    def test_yum_reinstall(self):
+        run_values = ["yum reinstall -y glibc && yum clean all"]
+        _, _, _, _, _, _, reinstall = analyze_run_commands(run_values)
+        self.assertEqual(reinstall, ["glibc"])
+
+    def test_reinstall_multiple_packages(self):
+        run_values = ["microdnf -y reinstall tzdata glibc && microdnf clean all"]
+        _, _, _, _, _, _, reinstall = analyze_run_commands(run_values)
+        self.assertEqual(reinstall, ["glibc", "tzdata"])
+
+    def test_reinstall_does_not_interfere_with_install(self):
+        run_values = ["microdnf -y install openssl && microdnf -y reinstall tzdata && microdnf clean all"]
+        pkgs, _, _, _, _, _, reinstall = analyze_run_commands(run_values)
+        self.assertEqual(pkgs, ["openssl"])
+        self.assertEqual(reinstall, ["tzdata"])
+
+    def test_no_reinstall_returns_empty(self):
+        run_values = ["dnf install -y wget && dnf clean all"]
+        _, _, _, _, _, _, reinstall = analyze_run_commands(run_values)
+        self.assertEqual(reinstall, [])
+
+    def test_real_world_oadp_pattern(self):
+        run_values = [
+            ". /cachi2/cachi2.env && "
+            "    microdnf -y install openssl && "
+            "microdnf -y reinstall tzdata && "
+            "microdnf clean all"
+        ]
+        pkgs, _, _, _, _, _, reinstall = analyze_run_commands(run_values)
+        self.assertEqual(pkgs, ["openssl"])
+        self.assertEqual(reinstall, ["tzdata"])

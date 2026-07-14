@@ -1963,6 +1963,40 @@ class TestRpmLockfilePrototypeGenerator(unittest.TestCase):
         self.assertTrue(result[0].options.get("skip_if_unavailable"))
         self.assertEqual(result[0].options["module_hotfixes"], 1)
 
+    def test_dockerfile_reinstall_packages_added_to_lockfile(self):
+        """
+        Packages explicitly reinstalled in the Dockerfile (e.g.
+        ``microdnf -y reinstall tzdata``) must appear in the lockfile's
+        reinstallPackages so cachi2 pre-fetches them and the hermetic
+        build can execute the reinstall at build time.
+        """
+        meta = self._make_mock_image_meta()
+        meta.config.konflux.cachi2.lockfile.get.return_value = None
+        generator = self._make_generator()
+        generator.downstream_parents = ["quay.io/test/base@sha256:abc123"]
+        generator._container.get_installed_packages = AsyncMock(return_value=["bash", "glibc", "tzdata"])
+
+        captured_configs: list[RpmsInConfig] = []
+
+        async def capture_resolve(config, image_pullspec=None):
+            captured_configs.append(config)
+            return FAKE_LOCKFILE_DATA.model_copy(deep=True)
+
+        generator._resolver.resolve = AsyncMock(side_effect=capture_resolve)
+
+        with TemporaryDirectory() as tmpdir:
+            dest_dir = Path(tmpdir)
+            (dest_dir / "Dockerfile").write_text(
+                "FROM base\nRUN microdnf -y install openssl && microdnf -y reinstall tzdata && microdnf clean all\n"
+            )
+            asyncio.run(generator.generate_lockfile(meta, dest_dir))
+
+        self.assertGreaterEqual(len(captured_configs), 1)
+        main_config = captured_configs[0]
+        self.assertIn("tzdata", main_config.reinstallPackages)
+        pkg_names = [p if isinstance(p, str) else p.name for p in main_config.packages]
+        self.assertIn("openssl", pkg_names)
+
 
 class TestDetermineStagePullspec(unittest.IsolatedAsyncioTestCase):
     """
