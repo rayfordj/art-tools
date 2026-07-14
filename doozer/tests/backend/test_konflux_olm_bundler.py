@@ -633,8 +633,7 @@ spec:
         self.rebaser._group_config.operator_image_ref_mode = "manifest-list"
         self.rebaser._group_config.vars = {"MAJOR": 4}
 
-        with patch("glob.glob", return_value=[]):
-            resolved = await self.rebaser._resolve_operands_from_db(metadata, image_references)
+        resolved = await self.rebaser._resolve_operands_from_db(metadata, image_references, {}, {})
 
         self.assertIn("ose-operand", resolved)
         old_spec, new_pullspec, nvr = resolved["ose-operand"]
@@ -695,8 +694,7 @@ spec:
         self.rebaser._group_config.operator_image_ref_mode = "by-arch"
         self.rebaser._group_config.vars = {"MAJOR": 4}
 
-        with patch("glob.glob", return_value=[]):
-            resolved = await self.rebaser._resolve_operands_from_db(metadata, image_references)
+        resolved = await self.rebaser._resolve_operands_from_db(metadata, image_references, {}, {})
 
         _, new_pullspec, _ = resolved["ose-operand"]
         self.assertIn("sha256:content222", new_pullspec)
@@ -718,9 +716,8 @@ spec:
             },
         }
 
-        with patch("glob.glob", return_value=[]):
-            with self.assertRaises(ValueError) as ctx:
-                await self.rebaser._resolve_operands_from_db(metadata, image_references)
+        with self.assertRaises(ValueError) as ctx:
+            await self.rebaser._resolve_operands_from_db(metadata, image_references, {}, {})
         self.assertIn("Unable to find unknown-image in name_in_bundle_map", str(ctx.exception))
 
     async def test_resolve_operands_from_db_disabled_image(self):
@@ -744,9 +741,8 @@ spec:
             },
         }
 
-        with patch("glob.glob", return_value=[]):
-            with self.assertRaises(DoozerFatalError):
-                await self.rebaser._resolve_operands_from_db(metadata, image_references)
+        with self.assertRaises(DoozerFatalError):
+            await self.rebaser._resolve_operands_from_db(metadata, image_references, {}, {})
 
     async def test_resolve_operands_from_db_no_build(self):
         """
@@ -773,9 +769,8 @@ spec:
             },
         }
 
-        with patch("glob.glob", return_value=[]):
-            with self.assertRaises(ValueError) as ctx:
-                await self.rebaser._resolve_operands_from_db(metadata, image_references)
+        with self.assertRaises(ValueError) as ctx:
+            await self.rebaser._resolve_operands_from_db(metadata, image_references, {}, {})
         self.assertIn("Could not find latest Konflux build", str(ctx.exception))
 
     @patch("doozerlib.util.oc_image_info_for_arch_async")
@@ -844,7 +839,10 @@ spec:
                 )
             )
 
-            resolved = await self.rebaser._resolve_operands_from_db(metadata, image_references)
+            delivery_override_map, delivery_namespace_map = self.rebaser._build_delivery_maps(metadata)
+            resolved = await self.rebaser._resolve_operands_from_db(
+                metadata, image_references, delivery_override_map, delivery_namespace_map
+            )
 
         # Should use the override name, not the versioned name
         self.assertIn("ose-csi-driver-rhel9", resolved)

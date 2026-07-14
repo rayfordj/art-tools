@@ -209,7 +209,7 @@ class KonfluxOlmBundleRebaser:
         image_references: dict[str, dict] = {}
         refs_path = operator_bundle_dir / "image-references"
         if not metadata.runtime.group.startswith("openshift-"):
-            refs_path = operator_manifests_dir / "../image-references"
+            refs_path = operator_manifests_dir.parent / "image-references"
         if refs_path.exists():
             async with aiofiles.open(refs_path, "r") as f:
                 image_refs = yaml.safe_load(await f.read())
@@ -243,8 +243,10 @@ class KonfluxOlmBundleRebaser:
         resolved_operands: dict[str, tuple[str, str, str]] = {}
         delivery_override_map: dict[str, str] = {}
         if operator_build.engine is Engine.KONFLUX and image_references and is_layered:
-            delivery_override_map, _ = self._build_delivery_maps(metadata)
-            resolved_operands = await self._resolve_operands_from_db(metadata, image_references)
+            delivery_override_map, delivery_namespace_map = self._build_delivery_maps(metadata)
+            resolved_operands = await self._resolve_operands_from_db(
+                metadata, image_references, delivery_override_map, delivery_namespace_map
+            )
 
         # Copy the operator's manifests to the bundle directory, replacing image
         # reference tags by their corresponding SHA for disconnected installs
@@ -417,7 +419,7 @@ class KonfluxOlmBundleRebaser:
                 override_short = str(repo_names[0]).rsplit("/", 1)[-1]
                 delivery_override_map[img_short] = override_short
             except (yaml.YAMLError, OSError) as e:
-                self._logger.debug("Failed to parse image YAML %s: %s", yml_path, e)
+                self._logger.warning("Failed to parse image YAML %s: %s", yml_path, e)
         return delivery_override_map, delivery_namespace_map
 
     def _build_delivery_pullspec(
@@ -510,6 +512,8 @@ class KonfluxOlmBundleRebaser:
         self,
         metadata: ImageMetadata,
         image_references: dict[str, dict],
+        delivery_override_map: dict[str, str],
+        delivery_namespace_map: dict[str, str],
     ) -> dict[str, tuple[str, str, str]]:
         """
         Resolve ART-built operand images from Konflux DB instead of relying
@@ -522,16 +526,17 @@ class KonfluxOlmBundleRebaser:
         Arg(s):
             metadata: ImageMetadata of the operator whose bundle is being rebased.
             image_references: Parsed image-references entries {name: {from: {name: spec}}}.
+            delivery_override_map: Versioned-to-unversioned name overrides.
+            delivery_namespace_map: Image-to-namespace overrides.
         Return Value(s):
             dict: {delivery_image_short_name: (old_pullspec, new_pullspec, nvr)}
         """
         logger = self._logger.getChild(f"[{metadata.distgit_key}]")
         csv_namespace = self._group_config.get("csv_namespace", "openshift")
-        delivery_override_map, delivery_namespace_map = self._build_delivery_maps(metadata)
 
-        # Phase 1: Query DB for latest builds and collect oc image info coroutines
-        operand_entries: list[tuple[str, str, str]] = []  # (name, spec, build_pullspec)
-        image_info_coros = []
+        # Phase 1a: Validate metadata and collect DB query coroutines
+        entries_meta: list[tuple[str, str, ImageMetadata]] = []  # (name, spec, meta)
+        build_coros = []
 
         for name, ref_entry in image_references.items():
             spec = ref_entry["from"]["name"]
@@ -549,13 +554,21 @@ class KonfluxOlmBundleRebaser:
                         f"{metadata.distgit_key} references it in image-references"
                     )
 
+            entries_meta.append((name, spec, meta))
             el_target = f"el{meta.branch_el_target()}"
-            # Call get_latest_konflux_build directly — this method inherently
-            # requires Konflux DB results regardless of runtime.build_system
-            build = await meta.get_latest_konflux_build(
-                el_target=el_target,
-                exclude_large_columns=True,
+            build_coros.append(
+                meta.get_latest_konflux_build(
+                    el_target=el_target,
+                    exclude_large_columns=True,
+                )
             )
+
+        # Phase 1b: Fetch all builds concurrently
+        builds = await asyncio.gather(*build_coros)
+
+        operand_entries: list[tuple[str, str, str]] = []  # (name, spec, build_pullspec)
+        image_info_coros = []
+        for (name, spec, meta), build in zip(entries_meta, builds, strict=True):
             if not build:
                 raise ValueError(f"Could not find latest Konflux build for {meta.distgit_key}")
 
@@ -635,7 +648,7 @@ class KonfluxOlmBundleRebaser:
             image_tag = match.group(2)
             art_references[pullspec] = (namespace, image_short_name, image_tag)
 
-        for pullspec, (namespace, image_short_name, image_tag) in art_references.items():
+        for _pullspec, (namespace, image_short_name, image_tag) in art_references.items():
             if engine is Engine.KONFLUX:
                 build_pullspec = f"{self.image_repo}:{image_short_name}-{image_tag}"
                 image_info_coros.append(
@@ -658,7 +671,7 @@ class KonfluxOlmBundleRebaser:
         delivery_override_map, delivery_namespace_map = self._build_delivery_maps(metadata)
         _component_to_meta: Optional[Dict[str, "ImageMetadata"]] = None
 
-        for pullspec, image_info in zip(art_references, image_infos):
+        for pullspec, image_info in zip(art_references, image_infos, strict=True):
             image_labels = image_info['config']['config']['Labels']
             image_component_name = image_labels['com.redhat.component']
             image_nvr = f"{image_component_name}-{image_labels['version']}-{image_labels['release']}"
