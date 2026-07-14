@@ -30,6 +30,7 @@ from artcommonlib.assembly import (
 from artcommonlib.constants import (
     OCP_RPA_BASE_URL,
     REGISTRY_QUAY_OCP_RELEASE_DEV,
+    REGISTRY_REDHAT_IO,
     SHIPMENT_DATA_URL_TEMPLATE,
 )
 from artcommonlib.github_auth import get_github_client_for_org
@@ -240,16 +241,16 @@ class PrepareReleaseKonfluxPipeline:
             )
 
         source_files = [quay_auth_file]
+        registries = [REGISTRY_QUAY_OCP_RELEASE_DEV]
         redhat_registry_auth_file = os.getenv('KONFLUX_OPERATOR_INDEX_AUTH_FILE')
         if redhat_registry_auth_file:
             source_files.append(redhat_registry_auth_file)
+            registries.append(REGISTRY_REDHAT_IO)
 
         with RegistryConfig(
             kubeconfig=os.environ.get('KUBECONFIG'),
             source_files=source_files,
-            registries=[
-                REGISTRY_QUAY_OCP_RELEASE_DEV,
-            ],
+            registries=registries,
         ) as global_auth_file:
             self._elliott_base_command.append(f'--registry-config={global_auth_file}')
             self._doozer_base_command.append(f'--registry-config={global_auth_file}')
