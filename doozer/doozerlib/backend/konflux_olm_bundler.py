@@ -205,16 +205,28 @@ class KonfluxOlmBundleRebaser:
         channel_name = str(channel['name'])
         csv_name = str(channel['currentCSV'])
 
-        # Read image references from the operator's image-references file
+        # Read image references from the operator's image-references file.
+        # Different operators place the file in different directories, so
+        # search multiple candidates (same order as rebaser.py).
+        refs_path = None
+        for candidate in [operator_bundle_dir, operator_manifests_dir, operator_manifests_dir.parent]:
+            if (candidate / "image-references").exists():
+                refs_path = candidate / "image-references"
+                break
+
         image_references: dict[str, dict] = {}
-        refs_path = operator_bundle_dir / "image-references"
-        if not metadata.runtime.group.startswith("openshift-"):
-            refs_path = operator_manifests_dir.parent / "image-references"
-        if refs_path.exists():
+        if refs_path is not None:
             async with aiofiles.open(refs_path, "r") as f:
                 image_refs = yaml.safe_load(await f.read())
             for entry in image_refs.get("spec", {}).get("tags", []):
                 image_references[entry["name"]] = entry
+        else:
+            logger.warning(
+                f"No image-references file found for {metadata.distgit_key}; "
+                f"searched: {[str(c / 'image-references') for c in [operator_bundle_dir, operator_manifests_dir, operator_manifests_dir.parent]]}. "
+                f"Falling back to legacy tag-based resolution. "
+                f"This fallback will be removed in a future release."
+            )
 
         # Validate that containerImage annotation in CSV matches an entry in image-references
         csv_files = list(operator_bundle_dir.glob("*.clusterserviceversion.yaml"))
@@ -303,7 +315,8 @@ class KonfluxOlmBundleRebaser:
         # Warn if the number of images found in the bundle doesn't match the image-references file
         if len(all_found_operands) != len(image_references):
             logger.warning(
-                f"Found {len(all_found_operands)} images in the bundle, but {len(image_references)} at {refs_path}"
+                f"Found {len(all_found_operands)} images in the bundle, but {len(image_references)} in image-references"
+                f" ({refs_path or 'file not found'})"
             )
             logger.warning(f"Found operands: {all_found_operands}")
 
