@@ -633,13 +633,14 @@ spec:
         self.rebaser._group_config.operator_image_ref_mode = "manifest-list"
         self.rebaser._group_config.vars = {"MAJOR": 4}
 
-        resolved = await self.rebaser._resolve_operands_from_db(metadata, image_references, {}, {})
+        resolved, rebased_name_map = await self.rebaser._resolve_operands_from_db(metadata, image_references, {}, {})
 
         self.assertIn("ose-operand", resolved)
         old_spec, new_pullspec, nvr = resolved["ose-operand"]
         self.assertEqual(old_spec, "registry.example.com/openshift/ose-operand:v4.18")
         self.assertIn("registry.redhat.io/openshift4/ose-operand@sha256:abc123def456", new_pullspec)
         self.assertEqual(nvr, "operand-container-4.18.0-202506120000.p0.g1234567.assembly.stream.el9")
+        self.assertEqual(rebased_name_map["ose-operand"], "ose-operand")
 
         # Verify DB query was made directly to Konflux
         operand_meta.get_latest_konflux_build.assert_called_once_with(
@@ -694,7 +695,7 @@ spec:
         self.rebaser._group_config.operator_image_ref_mode = "by-arch"
         self.rebaser._group_config.vars = {"MAJOR": 4}
 
-        resolved = await self.rebaser._resolve_operands_from_db(metadata, image_references, {}, {})
+        resolved, _rebased_name_map = await self.rebaser._resolve_operands_from_db(metadata, image_references, {}, {})
 
         _, new_pullspec, _ = resolved["ose-operand"]
         self.assertIn("sha256:content222", new_pullspec)
@@ -840,7 +841,7 @@ spec:
             )
 
             delivery_override_map, delivery_namespace_map = self.rebaser._build_delivery_maps(metadata)
-            resolved = await self.rebaser._resolve_operands_from_db(
+            resolved, _rebased_name_map = await self.rebaser._resolve_operands_from_db(
                 metadata, image_references, delivery_override_map, delivery_namespace_map
             )
 
@@ -959,13 +960,16 @@ spec:
         mock_iterdir.side_effect = lambda: iter(bundle_files)
 
         mock_build_delivery_maps.return_value = ({}, {})
-        mock_resolve_operands.return_value = {
-            "ose-operand-a": (
-                "registry.example.com/openshift/ose-operand-a:v4.18",
-                "registry.redhat.io/openshift4/ose-operand-a@sha256:abc123",
-                "operand-a-container-4.18.0-1.el9",
-            ),
-        }
+        mock_resolve_operands.return_value = (
+            {
+                "ose-operand-a": (
+                    "registry.example.com/openshift/ose-operand-a:v4.18",
+                    "registry.redhat.io/openshift4/ose-operand-a@sha256:abc123",
+                    "operand-a-container-4.18.0-1.el9",
+                ),
+            },
+            {"ose-operand-a": "ose-operand-a"},
+        )
 
         await self.rebaser._rebase_dir(metadata, operator_dir, bundle_dir, operator_build, input_release)
 
