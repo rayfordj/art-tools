@@ -285,8 +285,9 @@ class KonfluxOlmBundleRebaser:
                     _, img_short = match.group(1).rsplit("/", maxsplit=1)
                     delivery_name = delivery_override_map.get(img_short, img_short)
                     if delivery_name in pullspec_by_delivery:
-                        content = content.replace(old_pullspec, pullspec_by_delivery[delivery_name])
-                        found_images[delivery_name] = resolved_operands[delivery_name]
+                        _, new_pullspec, operand_nvr = resolved_operands[delivery_name]
+                        content = content.replace(old_pullspec, new_pullspec)
+                        found_images[delivery_name] = (old_pullspec, new_pullspec, operand_nvr)
                 found_images.update(self._find_external_digest_images(content, found_images))
             else:
                 # Brew engine: use tag-based regex resolution (legacy path)
