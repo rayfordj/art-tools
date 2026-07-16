@@ -789,6 +789,9 @@ class KonfluxImageBuilder:
                 self._config.plr_template = pyartcd_constants.KONFLUX_IMAGE_BUILD_PLR_TEMPLATE_URL_FORMAT.format(
                     owner=plr_template_owner, branch_name=plr_template_branch
                 )
+            else:
+                self._config.plr_template = constants.KONFLUX_DEFAULT_IMAGE_BUILD_PLR_TEMPLATE_URL
+
         build_params = ImageBuildParams(
             hermetic=hermetic,
             enable_symlink_check=enable_symlink_check,
