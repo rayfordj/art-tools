@@ -48,6 +48,33 @@ def is_release_embargoed(release: str, build_system: str, default=True) -> bool:
     return default
 
 
+def is_nvr_embargoed(nvr: str, build_system: str = 'konflux') -> bool:
+    """
+    Determine embargo status directly from an NVR string.
+    E.g. 'foo-1.0-1.p3' -> True (konflux, private), 'foo-1.0-1.p2' -> False (konflux, public)
+
+    Note: this deliberately searches the *entire* NVR string for a visibility suffix rather
+    than isolating the release field first. Not all NVR shapes put the p-flag in the release
+    field: e.g. OLM bundle "metadata-container" NVRs embed the referenced operator's full
+    release string (including its p-flag) in the *version* field instead
+    (bundle_version = f'{operator_version}.{operator_release}' in konflux_olm_bundler.py),
+    while the bundle's own release is just a trivial build counter like "1". Searching the
+    whole NVR finds the p-flag wherever it actually lives.
+
+    Because the whole NVR is in scope, a p-flag-shaped token could theoretically turn up more
+    than once (e.g. an embedded operator release plus something else that happens to match).
+    Rather than silently trusting whichever match comes first, treat that as ambiguous and
+    raise, since we can't be sure which one (if any) reflects the actual embargo status.
+    """
+    pflags = find_all_pflags_in_release(nvr)
+    if len(pflags) > 1:
+        raise ValueError(
+            f"NVR {nvr!r} contains multiple visibility-suffix matches {pflags!r}; refusing to "
+            "guess which one reflects the actual embargo status."
+        )
+    return is_release_embargoed(nvr, build_system)
+
+
 def get_visibility_suffix(build_system: str, visibility: BuildVisibility) -> str:
     """
     Get the p? flag based on the visibility status and the build system. E.g.:
@@ -64,16 +91,23 @@ def get_all_visibility_suffixes() -> List[str]:
     return [suffix for d in VISIBILITY_SUFFIX.values() for suffix in d.values()]
 
 
+def find_all_pflags_in_release(release: str) -> List[str]:
+    """
+    Given a release (or NVR) string, return every visibility-suffix match found in it (e.g.
+    'p0', 'p1', 'p2', 'p3', or the wildcard 'p?'), in order of appearance. Usually 0 or 1
+    matches; more than one means the string is ambiguous.
+    """
+    suffixes = get_all_visibility_suffixes() + ['p?']
+    suffix_pattern = '|'.join(re.escape(suffix) for suffix in suffixes)
+    pattern = rf'\.({suffix_pattern})(?:\.|$)'
+    return re.findall(pattern, release)
+
+
 def isolate_pflag_in_release(release: str) -> Optional[str]:
     """
     Given a release field, determines whether it contains any of the visibility suffixes.
     If it does, it returns the matched suffix (e.g., 'p0', 'p1', 'p2', 'p3').
     If not found, returns None.
     """
-    suffixes = get_all_visibility_suffixes() + ['p?']
-    suffix_pattern = '|'.join(re.escape(suffix) for suffix in suffixes)
-    pattern = rf'\.({suffix_pattern})(?:\.|$)'
-    match = re.search(pattern, release)
-    if match:
-        return match.group(1)
-    return None
+    pflags = find_all_pflags_in_release(release)
+    return pflags[0] if pflags else None

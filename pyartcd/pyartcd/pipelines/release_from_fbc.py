@@ -15,6 +15,7 @@ from urllib.parse import urlparse
 import click
 import yaml as stdlib_yaml
 from artcommonlib import exectools
+from artcommonlib.build_visibility import is_nvr_embargoed
 from artcommonlib.constants import SHIPMENT_DATA_URL_TEMPLATE
 from artcommonlib.gitdata import SafeFormatter
 from artcommonlib.github_auth import get_github_client_for_org
@@ -1214,6 +1215,32 @@ class ReleaseFromFbcPipeline:
 
         if not all_nvrs and not self.extra_image_nvrs:
             raise RuntimeError("No NVRs extracted from FBC images and no extra image NVRs provided")
+
+        # Defensive check: bundle rebases (and the operator-level filter in
+        # build_layered_products.py) should already guarantee that the bundle/operand images
+        # referenced by an FBC are never embargoed. If an embargoed NVR reaches this point
+        # anyway - whether from the FBC's related images or from a manual --extra-image-nvrs
+        # override - that signals a serious upstream bug (or misuse of --extra-image-nvrs), so
+        # fail the release rather than silently dropping it.
+        #
+        # Note: this deliberately checks related_nvrs (the actual bundle/operand images
+        # referenced inside the FBC catalog), not fbc_nvrs (the FBC/catalog image's own NVR).
+        # The FBC image is just a catalog wrapper; its own NVR is never embargo-relevant and,
+        # by construction (see build_fbc.py), never carries a p-flag at all - so including it
+        # here would make this check fail unconditionally on every run.
+        try:
+            embargoed_nvrs = [nvr for nvr in related_nvrs + self.extra_image_nvrs if is_nvr_embargoed(nvr)]
+        except ValueError as e:
+            # is_nvr_embargoed() raises when an NVR's embargo status is ambiguous (e.g. it
+            # matches more than one visibility suffix). Treat that the same as finding an
+            # embargoed NVR: refuse to guess and fail the release.
+            raise RuntimeError(f"Refusing to create a release: unable to determine embargo status: {e}") from e
+        if embargoed_nvrs:
+            raise RuntimeError(
+                f"Refusing to create a release referencing embargoed (private-fix) NVR(s): "
+                f"{embargoed_nvrs}. This should never happen for FBC-derived NVRs and likely "
+                f"indicates an upstream bug, or an embargoed NVR was passed via --extra-image-nvrs."
+            )
 
         # Categorize the extracted NVRs
         empty_categorized: Dict[str, List[str]]

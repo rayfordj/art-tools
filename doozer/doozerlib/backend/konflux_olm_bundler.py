@@ -14,6 +14,7 @@ import yaml
 from artcommonlib import exectools
 from artcommonlib import util as artlib_util
 from artcommonlib.assembly import AssemblyTypes
+from artcommonlib.build_visibility import is_nvr_embargoed
 from artcommonlib.constants import KONFLUX_DEFAULT_IMAGE_SHARE_REPO
 from artcommonlib.konflux.konflux_build_record import (
     KonfluxBuildOutcome,
@@ -36,6 +37,13 @@ _LOGGER = logging.getLogger(__name__)
 
 
 BUNDLE_BUILD_PRIORITY = "3"
+
+
+class KonfluxOlmBundleRebaseError(Exception):
+    """Raised when an operator bundle cannot be safely rebased, e.g. an embargoed operand
+    image has no public substitute available."""
+
+    pass
 
 
 class KonfluxOlmBundleRebaser:
@@ -366,6 +374,29 @@ class KonfluxOlmBundleRebaser:
         pattern = r'([a-zA-Z0-9][-a-zA-Z0-9.]*(?::[0-9]+)?/[^@\s]+)@(sha256:[a-fA-F0-9]{64})'
         return re.compile(pattern)
 
+    @staticmethod
+    def _build_component_to_meta_map(runtime) -> Dict[str, "ImageMetadata"]:
+        """
+        Build a map of component name (as it appears in the com.redhat.component label / NVR) to
+        the ART ImageMetadata that builds it, covering every image declared in the group -- not
+        just the images actually loaded for this invocation.
+
+        `doozer beta:images:konflux:bundle <operator-nvr>` restricts `runtime.images` to just the
+        given operator(s) (see KonfluxBundleCli.get_operator_builds()), so `runtime.image_metas()`
+        alone would miss an embargoed operand image that belongs to a different (unloaded) image
+        in the same group, e.g. a dependent image referenced by the operator's CSV. Fall back to
+        `Runtime.late_resolve_image()`, which can resolve any image declared in the group's
+        `images/` directory on demand without adding it to `image_map` or triggering dependents.
+        """
+        component_to_meta = {im.get_component_name(): im for im in runtime.image_metas()}
+        for distgit_key in set(runtime.image_name_map.values()):
+            if distgit_key in runtime.image_map:
+                continue  # already covered by runtime.image_metas() above
+            other_meta = runtime.late_resolve_image(distgit_key, add=False, required=False)
+            if other_meta is not None:
+                component_to_meta.setdefault(other_meta.get_component_name(), other_meta)
+        return component_to_meta
+
     async def _replace_image_references(self, old_registry: str, content: str, engine: Engine, metadata):
         """
         Replace image references in the content by their corresponding SHA.
@@ -457,12 +488,67 @@ class KonfluxOlmBundleRebaser:
                 _delivery_override_map[_img_short] = _override_short
             except (yaml.YAMLError, OSError) as e:
                 self._logger.debug("Failed to parse image YAML %s: %s", _yml_path, e)
+        # Map component name (as it appears in the com.redhat.component label / NVR) to the
+        # ART ImageMetadata that builds it, so embargoed operands can be mapped back to a
+        # metadata object to query for a public substitute build. Computed lazily (only if an
+        # embargoed operand is actually encountered below) to avoid the cost of iterating every
+        # image metadata on the common (non-embargoed) path.
+        _component_to_meta: Optional[Dict[str, ImageMetadata]] = None
+
         for pullspec, image_info in zip(art_references, image_infos):
             image_labels = image_info['config']['config']['Labels']
             image_version = image_labels['version']
             image_release = image_labels['release']
             image_component_name = image_labels['com.redhat.component']
             image_nvr = f"{image_component_name}-{image_version}-{image_release}"
+
+            # Operator bundles are only ever shipped publicly, so they must never reference an
+            # embargoed (private-fix) operand image. If the resolved operand build is embargoed,
+            # substitute it with the latest public (non-embargoed) build of that same component.
+            # If no public build exists, fail the rebase rather than shipping embargoed content.
+            try:
+                operand_is_embargoed = engine is Engine.KONFLUX and is_nvr_embargoed(image_nvr)
+            except ValueError as e:
+                # is_nvr_embargoed() raises when the NVR's embargo status is ambiguous (e.g. it
+                # matches more than one visibility suffix). Don't guess; fail the rebase.
+                raise KonfluxOlmBundleRebaseError(
+                    f"Unable to determine embargo status for operand image {image_nvr} referenced "
+                    f"by operator {metadata.distgit_key}: {e}"
+                ) from e
+            if operand_is_embargoed:
+                if _component_to_meta is None:
+                    _component_to_meta = self._build_component_to_meta_map(metadata.runtime)
+                operand_meta = _component_to_meta.get(image_component_name)
+                if operand_meta is None:
+                    raise KonfluxOlmBundleRebaseError(
+                        f"Operand image {image_nvr} referenced by operator {metadata.distgit_key} is "
+                        f"embargoed, but no ART image metadata could be found for component "
+                        f"'{image_component_name}' to look up a public substitute."
+                    )
+                public_build = await operand_meta.get_latest_konflux_build(
+                    default=None,
+                    el_target=operand_meta.branch_el_target(),
+                    embargoed=False,
+                    exclude_large_columns=True,
+                )
+                if not public_build:
+                    raise KonfluxOlmBundleRebaseError(
+                        f"Operand image {image_nvr} referenced by operator {metadata.distgit_key} is "
+                        f"embargoed, and no public (non-embargoed) build of '{operand_meta.distgit_key}' "
+                        f"is available to substitute. Cannot safely rebase this operator bundle."
+                    )
+                self._logger.warning(
+                    "Operand image %s referenced by operator %s is embargoed; substituting with public build %s",
+                    image_nvr,
+                    metadata.distgit_key,
+                    public_build.nvr,
+                )
+                image_info = await util.oc_image_info_for_arch_async(
+                    public_build.image_pullspec,
+                    registry_config=os.getenv("QUAY_AUTH_FILE"),
+                )
+                image_nvr = public_build.nvr
+
             namespace, image_short_name, image_tag = art_references[pullspec]
             image_sha = (
                 image_info['contentDigest']

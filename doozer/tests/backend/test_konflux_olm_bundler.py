@@ -8,9 +8,14 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import yaml
 from artcommonlib.konflux.konflux_build_record import KonfluxBuildOutcome, KonfluxBundleBuildRecord
 from artcommonlib.konflux.konflux_db import Engine
+from artcommonlib.model import Model
 from doozerlib import constants
 from doozerlib.backend.konflux_client import ImageBuildParams
-from doozerlib.backend.konflux_olm_bundler import KonfluxOlmBundleBuilder, KonfluxOlmBundleRebaser
+from doozerlib.backend.konflux_olm_bundler import (
+    KonfluxOlmBundleBuilder,
+    KonfluxOlmBundleRebaseError,
+    KonfluxOlmBundleRebaser,
+)
 from doozerlib.backend.pipelinerun_utils import PipelineRunInfo
 
 
@@ -91,7 +96,9 @@ class TestKonfluxOlmBundleRebaser(IsolatedAsyncioTestCase):
                     'Labels': {
                         'com.redhat.component': 'test-brew-component',
                         'version': '1.0',
-                        'release': '1',
+                        # Public (non-embargoed) Konflux release, so the embargo-substitution
+                        # path introduced for layered-product bundles is not exercised here.
+                        'release': '202607151200.p2.g172d0b2.assembly.stream.el9',
                     },
                     'Env': {
                         '__doozer_key=test-component',
@@ -128,7 +135,7 @@ class TestKonfluxOlmBundleRebaser(IsolatedAsyncioTestCase):
             (
                 'registry.example.com/namespace/image:tag',
                 'registry.redhat.io/openshift4/image@sha256:1234567890abcdef',
-                'test-brew-component-1.0-1',
+                'test-brew-component-1.0-202607151200.p2.g172d0b2.assembly.stream.el9',
             ),
         )
 
@@ -143,7 +150,8 @@ class TestKonfluxOlmBundleRebaser(IsolatedAsyncioTestCase):
                     'Labels': {
                         'com.redhat.component': 'test-component',
                         'version': '1.0',
-                        'release': '1',
+                        # Public (non-embargoed) Konflux release.
+                        'release': '202607151200.p2.g172d0b2.assembly.stream.el9',
                     },
                 },
             },
@@ -179,7 +187,8 @@ class TestKonfluxOlmBundleRebaser(IsolatedAsyncioTestCase):
                     'Labels': {
                         'com.redhat.component': 'test-component',
                         'version': '1.0',
-                        'release': '1',
+                        # Public (non-embargoed) Konflux release.
+                        'release': '202607151200.p2.g172d0b2.assembly.stream.el9',
                     },
                 },
             },
@@ -992,3 +1001,277 @@ class TestKonfluxOlmBundleBuilder(IsolatedAsyncioTestCase):
                 ["operand1-1.0-1", "operand2-1.0-1"],
             )
             self.assertIn('Failed writing record to the konflux DB', cm.output[0])
+
+
+class TestReplaceImageReferencesEmbargo(IsolatedAsyncioTestCase):
+    """Covers the embargoed-operand substitution logic added to _replace_image_references()
+    for layered-product operator bundles: embargoed operand references must never be shipped
+    in a public bundle, so they are substituted with the latest public build, or the rebase
+    fails clearly if no public substitute exists."""
+
+    def setUp(self):
+        self.rebaser = KonfluxOlmBundleRebaser(
+            base_dir=Path('/tmp/nonexistent-base-dir'),
+            group='openshift-4.18',
+            assembly='stream',
+            group_config=Model({}),
+            konflux_db=MagicMock(),
+            source_resolver=MagicMock(),
+            image_repo='quay.io/example/repo',
+            logger=MagicMock(),
+        )
+
+    def _make_metadata(self, image_metas=None):
+        metadata = MagicMock()
+        metadata.distgit_key = 'my-operator'
+        metadata.runtime.group = 'openshift-4.18'
+        metadata.runtime.data_dir = '/tmp/nonexistent-data-dir'
+        metadata.runtime.image_metas.return_value = image_metas or []
+        # By default, simulate a fully-loaded runtime where image_metas() already covers every
+        # image in the group, so the late_resolve_image() fallback in
+        # _build_component_to_meta_map() has nothing extra to find. Tests that specifically
+        # exercise that fallback (e.g. because `doozer beta:images:konflux:bundle <nvr>` restricts
+        # image_metas() to just the given operator) override these explicitly.
+        metadata.runtime.image_map = {im.distgit_key: im for im in (image_metas or [])}
+        metadata.runtime.image_name_map = {}
+        return metadata
+
+    @staticmethod
+    def _image_info(component, version, release, digest_suffix):
+        return {
+            'config': {
+                'config': {'Labels': {'version': version, 'release': release, 'com.redhat.component': component}}
+            },
+            'contentDigest': f'sha256:{digest_suffix}-content',
+            'listDigest': f'sha256:{digest_suffix}-list',
+        }
+
+    async def test_non_embargoed_operand_resolves_normally(self):
+        """A non-embargoed operand is resolved to its digest without any substitution."""
+        content = 'image: registry.redhat.io/openshift4/mypublic-operand-rhel9:v1.0'
+        metadata = self._make_metadata()
+
+        with patch(
+            'doozerlib.backend.konflux_olm_bundler.util.oc_image_info_for_arch_async',
+            new_callable=AsyncMock,
+            return_value=self._image_info(
+                'mypublic-operand-container', 'v1.0', '202607151200.p2.g172d0b2.assembly.stream.el9', 'public'
+            ),
+        ) as mock_oc_info:
+            new_content, found_images = await self.rebaser._replace_image_references(
+                'registry.redhat.io', content, Engine.KONFLUX, metadata
+            )
+
+        mock_oc_info.assert_awaited_once()
+        self.assertIn('registry.redhat.io/openshift4/mypublic-operand-rhel9@sha256:public-list', new_content)
+        self.assertEqual(
+            found_images['mypublic-operand-rhel9'][2],
+            'mypublic-operand-container-v1.0-202607151200.p2.g172d0b2.assembly.stream.el9',
+        )
+        # The lazy component-metadata map should never be built when nothing is embargoed.
+        metadata.runtime.image_metas.assert_not_called()
+
+    async def test_embargoed_operand_is_substituted_with_public_build(self):
+        """An embargoed operand is substituted with the latest public build of the same component."""
+        content = 'image: registry.redhat.io/openshift4/my-embargoed-operand-rhel9:v1.0'
+        metadata = self._make_metadata()
+
+        public_build = MagicMock()
+        public_build.nvr = 'my-embargoed-operand-container-v1.0-202607151201.p2.g8a1f3c4.assembly.stream.el9'
+        public_build.image_pullspec = 'quay.io/example/repo@sha256:public-build-digest'
+
+        operand_meta = MagicMock()
+        operand_meta.distgit_key = 'my-embargoed-operand'
+        operand_meta.get_component_name.return_value = 'my-embargoed-operand-container'
+        operand_meta.branch_el_target.return_value = 9
+        operand_meta.get_latest_konflux_build = AsyncMock(return_value=public_build)
+        metadata.runtime.image_metas.return_value = [operand_meta]
+
+        embargoed_info = self._image_info(
+            'my-embargoed-operand-container', 'v1.0', '202607151200.p3.g172d0b2.assembly.stream.el9', 'embargoed'
+        )
+        public_info = self._image_info(
+            'my-embargoed-operand-container', 'v1.0', '202607151201.p2.g8a1f3c4.assembly.stream.el9', 'public-sub'
+        )
+
+        async def fake_oc_image_info(pullspec, registry_config=None):
+            if pullspec == public_build.image_pullspec:
+                return public_info
+            return embargoed_info
+
+        with patch(
+            'doozerlib.backend.konflux_olm_bundler.util.oc_image_info_for_arch_async',
+            side_effect=fake_oc_image_info,
+        ) as mock_oc_info:
+            new_content, found_images = await self.rebaser._replace_image_references(
+                'registry.redhat.io', content, Engine.KONFLUX, metadata
+            )
+
+        self.assertEqual(mock_oc_info.call_count, 2)
+        operand_meta.get_latest_konflux_build.assert_awaited_once_with(
+            default=None, el_target=9, embargoed=False, exclude_large_columns=True
+        )
+        # The substituted (public) build's digest should be used in the final content, not the
+        # embargoed build's digest.
+        self.assertIn('registry.redhat.io/openshift4/my-embargoed-operand-rhel9@sha256:public-sub-list', new_content)
+        self.assertNotIn('embargoed-list', new_content)
+        self.assertEqual(
+            found_images['my-embargoed-operand-rhel9'][2],
+            public_build.nvr,
+        )
+
+    async def test_embargoed_operand_with_no_public_alternative_raises(self):
+        """When an embargoed operand has no public build to substitute, the rebase fails clearly."""
+        content = 'image: registry.redhat.io/openshift4/my-embargoed-operand-rhel9:v1.0'
+        metadata = self._make_metadata()
+
+        operand_meta = MagicMock()
+        operand_meta.distgit_key = 'my-embargoed-operand'
+        operand_meta.get_component_name.return_value = 'my-embargoed-operand-container'
+        operand_meta.branch_el_target.return_value = 9
+        operand_meta.get_latest_konflux_build = AsyncMock(return_value=None)
+        metadata.runtime.image_metas.return_value = [operand_meta]
+
+        embargoed_info = self._image_info(
+            'my-embargoed-operand-container', 'v1.0', '202607151200.p3.g172d0b2.assembly.stream.el9', 'embargoed'
+        )
+
+        with patch(
+            'doozerlib.backend.konflux_olm_bundler.util.oc_image_info_for_arch_async',
+            new_callable=AsyncMock,
+            return_value=embargoed_info,
+        ):
+            with self.assertRaises(KonfluxOlmBundleRebaseError):
+                await self.rebaser._replace_image_references('registry.redhat.io', content, Engine.KONFLUX, metadata)
+
+    async def test_embargoed_operand_not_in_restricted_image_metas_is_found_via_late_resolve(self):
+        """Reproduces a real production failure: `doozer beta:images:konflux:bundle <operator-nvr>`
+        restricts runtime.image_metas() to just the given operator (see
+        KonfluxBundleCli.get_operator_builds()), so an embargoed operand belonging to a different,
+        unloaded image in the same group (e.g. a dependent image referenced by the operator's CSV)
+        is invisible to image_metas() alone. _build_component_to_meta_map() must fall back to
+        Runtime.late_resolve_image() to find it rather than failing with "no ART image metadata
+        could be found"."""
+        content = 'image: registry.redhat.io/openshift4/log-file-metric-exporter-rhel9:v1.0'
+        # Only the operator itself is loaded into image_metas(); the operand ("dependent" image)
+        # is not, mirroring the restricted `--images`-style loading done for bundle builds.
+        metadata = self._make_metadata(image_metas=[])
+        metadata.runtime.image_name_map = {
+            'openshift-logging/log-file-metric-exporter-rhel9': 'log-file-metric-exporter',
+            'log-file-metric-exporter-rhel9': 'log-file-metric-exporter',
+        }
+        metadata.runtime.image_map = {}  # not loaded for this invocation
+
+        public_build = MagicMock()
+        public_build.nvr = 'log-file-metric-exporter-container-6.6.1-202607160200.p2.g3c1201f.assembly.test.el9'
+        public_build.image_pullspec = 'quay.io/example/repo@sha256:public-build-digest'
+
+        operand_meta = MagicMock()
+        operand_meta.distgit_key = 'log-file-metric-exporter'
+        operand_meta.get_component_name.return_value = 'log-file-metric-exporter-container'
+        operand_meta.branch_el_target.return_value = 9
+        operand_meta.get_latest_konflux_build = AsyncMock(return_value=public_build)
+        metadata.runtime.late_resolve_image = MagicMock(return_value=operand_meta)
+
+        embargoed_info = self._image_info(
+            'log-file-metric-exporter-container',
+            '6.6.1',
+            '202607160122.p3.g3c1201f.assembly.test.el9',
+            'embargoed',
+        )
+        public_info = self._image_info(
+            'log-file-metric-exporter-container',
+            '6.6.1',
+            '202607160200.p2.g3c1201f.assembly.test.el9',
+            'public-sub',
+        )
+
+        async def fake_oc_image_info(pullspec, registry_config=None):
+            if pullspec == public_build.image_pullspec:
+                return public_info
+            return embargoed_info
+
+        with patch(
+            'doozerlib.backend.konflux_olm_bundler.util.oc_image_info_for_arch_async',
+            side_effect=fake_oc_image_info,
+        ):
+            new_content, found_images = await self.rebaser._replace_image_references(
+                'registry.redhat.io', content, Engine.KONFLUX, metadata
+            )
+
+        metadata.runtime.late_resolve_image.assert_called_once_with(
+            'log-file-metric-exporter', add=False, required=False
+        )
+        operand_meta.get_latest_konflux_build.assert_awaited_once_with(
+            default=None, el_target=9, embargoed=False, exclude_large_columns=True
+        )
+        self.assertIn(
+            'registry.redhat.io/openshift4/log-file-metric-exporter-rhel9@sha256:public-sub-list', new_content
+        )
+        self.assertEqual(
+            found_images['log-file-metric-exporter-rhel9'][2],
+            public_build.nvr,
+        )
+
+    async def test_embargoed_operand_with_unknown_component_raises(self):
+        """When an embargoed operand's component can't be mapped to any ART ImageMetadata, fail clearly."""
+        content = 'image: registry.redhat.io/openshift4/my-embargoed-operand-rhel9:v1.0'
+        metadata = self._make_metadata(image_metas=[])  # no metadata registered for this component
+
+        embargoed_info = self._image_info(
+            'my-embargoed-operand-container', 'v1.0', '202607151200.p3.g172d0b2.assembly.stream.el9', 'embargoed'
+        )
+
+        with patch(
+            'doozerlib.backend.konflux_olm_bundler.util.oc_image_info_for_arch_async',
+            new_callable=AsyncMock,
+            return_value=embargoed_info,
+        ):
+            with self.assertRaises(KonfluxOlmBundleRebaseError):
+                await self.rebaser._replace_image_references('registry.redhat.io', content, Engine.KONFLUX, metadata)
+
+    async def test_operand_with_ambiguous_embargo_status_raises(self):
+        """When an operand's NVR matches more than one visibility suffix (ambiguous embargo
+        status), the rebase fails clearly rather than guessing which suffix applies."""
+        content = 'image: registry.redhat.io/openshift4/my-ambiguous-operand-rhel9:v1.0'
+        metadata = self._make_metadata()
+
+        # Synthetic/defensive case: version and release combine into an NVR carrying two
+        # visibility suffixes (real ART NVRs never carry more than one).
+        ambiguous_info = self._image_info(
+            'my-ambiguous-operand-container',
+            '1.0.202607151200.p2.g172d0b2.assembly.stream.el9',
+            '1.p3',
+            'ambiguous',
+        )
+
+        with patch(
+            'doozerlib.backend.konflux_olm_bundler.util.oc_image_info_for_arch_async',
+            new_callable=AsyncMock,
+            return_value=ambiguous_info,
+        ):
+            with self.assertRaises(KonfluxOlmBundleRebaseError):
+                await self.rebaser._replace_image_references('registry.redhat.io', content, Engine.KONFLUX, metadata)
+
+    async def test_brew_engine_does_not_check_embargo(self):
+        """Embargo substitution is only applied for Konflux-engine operands; Brew engine is unaffected."""
+        content = 'image: registry.redhat.io/openshift4/my-embargoed-operand-rhel9:v1.0'
+        metadata = self._make_metadata()
+        embargoed_info = self._image_info(
+            'my-embargoed-operand-container', 'v1.0', '202607151200.p3.g172d0b2.assembly.stream.el9', 'embargoed'
+        )
+
+        with patch(
+            'doozerlib.backend.konflux_olm_bundler.util.oc_image_info_for_arch_async',
+            new_callable=AsyncMock,
+            return_value=embargoed_info,
+        ) as mock_oc_info:
+            new_content, found_images = await self.rebaser._replace_image_references(
+                'registry.redhat.io', content, Engine.BREW, metadata
+            )
+
+        # No substitution attempted; the (embargoed) build's own digest is used as-is.
+        mock_oc_info.assert_awaited_once()
+        self.assertIn('registry.redhat.io/openshift4/my-embargoed-operand-rhel9@sha256:embargoed-list', new_content)
+        # The lazy component-metadata map should never be built for the Brew engine.
+        metadata.runtime.image_metas.assert_not_called()
