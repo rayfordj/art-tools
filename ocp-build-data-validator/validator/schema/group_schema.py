@@ -12,6 +12,8 @@ from jsonschema import RefResolver, ValidationError
 from jsonschema.validators import validator_for
 from schema import SchemaError
 
+from validator.support import replace_vars
+
 if sys.version_info < (3, 9):
     # importlib.resources either doesn't exist or lacks the files()
     # function, so use the PyPI version:
@@ -80,7 +82,14 @@ def validate(_, data):
     bridge_release = demerged_data.get("bridge_release") or {}
     basis_group = bridge_release.get("basis_group")
     group_name = demerged_data.get("name")
+    vars_map = demerged_data.get("vars") or {}
     if basis_group and group_name:
+        # group.yml's `name` is normally an unresolved "{MAJOR}.{MINOR}" template
+        # (substituted at runtime by doozer/elliott). Resolve it here too, otherwise
+        # every group.yml with a templated name fails this check.
+        if "MAJOR" in vars_map and "MINOR" in vars_map:
+            group_name = replace_vars(group_name, vars_map)
+            basis_group = replace_vars(basis_group, vars_map)
         try:
             validate_bridge_release_basis_group(group_name, basis_group)
         except ValueError as e:
