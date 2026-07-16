@@ -1884,9 +1884,7 @@ class TestRpmLockfilePrototypeGenerator(unittest.TestCase):
     def test_build_repo_list_templatizes_multi_arch_url(self):
         baseos = MagicMock()
         baseos.name = "rhel-9-baseos-rpms"
-        baseos.baseurl.side_effect = lambda repotype="unsigned", arch="x86_64": (
-            f"https://example.com/baseos/{arch}/os/"
-        )
+        baseos.baseurl.side_effect = lambda repotype="unsigned", arch="x86_64": f"https://example.com/baseos/{arch}/os/"
         baseos.content_set.return_value = "rhel-9-for-x86_64-baseos-rpms"
 
         repo_map = {"rhel-9-baseos-rpms": baseos}
@@ -1927,9 +1925,7 @@ class TestRpmLockfilePrototypeGenerator(unittest.TestCase):
     def test_build_repo_list_non_optional_repo_no_skip_if_unavailable(self):
         baseos = MagicMock()
         baseos.name = "rhel-9-baseos-rpms"
-        baseos.baseurl.side_effect = lambda repotype="unsigned", arch="x86_64": (
-            f"https://example.com/baseos/{arch}/os/"
-        )
+        baseos.baseurl.side_effect = lambda repotype="unsigned", arch="x86_64": f"https://example.com/baseos/{arch}/os/"
         baseos.content_set.return_value = "rhel-9-for-x86_64-baseos-rpms"
         baseos.cs_optional = False
         baseos._data.conf.get.side_effect = lambda key, default=None: default if key == "extra_options" else default
