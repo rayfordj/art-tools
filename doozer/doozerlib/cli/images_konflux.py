@@ -399,8 +399,7 @@ class KonfluxBuildCli:
 @click.option(
     '--plr-template',
     required=False,
-    default=constants.KONFLUX_DEFAULT_IMAGE_BUILD_PLR_TEMPLATE_URL,
-    help='Use a custom PipelineRun template to build the bundle. Overrides the default template from openshift-priv/art-konflux-template',
+    help='Use a custom PipelineRun template to build the image. Overrides the default template from openshift-priv/art-konflux-template or the value from group.yaml if it is set',
 )
 @click.option(
     '--build-priority',
@@ -432,7 +431,7 @@ async def images_konflux_build(
     skip_checks: bool,
     skip_tasks: tuple,
     dry_run: bool,
-    plr_template: str,
+    plr_template: Optional[str],
     build_priority: Optional[str],
     network_mode: Optional[str],
     skip_ec_verify: bool,

@@ -42,6 +42,8 @@ from doozerlib.source_resolver import SourceResolution
 from packageurl import PackageURL
 from tenacity import retry, stop_after_attempt, wait_fixed
 
+from pyartcd import constants as pyartcd_constants
+
 LOGGER = logging.getLogger(__name__)
 
 
@@ -85,7 +87,7 @@ class KonfluxImageBuilderConfig:
     base_dir: Path
     group_name: str
     namespace: str
-    plr_template: str
+    plr_template: Optional[str] = None
     kubeconfig: Optional[str] = None
     context: Optional[str] = None
     image_repo: str = constants.KONFLUX_DEFAULT_IMAGE_REPO
@@ -780,7 +782,13 @@ class KonfluxImageBuilder:
         prefetch_mode = (
             str(cachi2_config.get("prefetch_mode")) if cachi2_config and cachi2_config.get("prefetch_mode") else None
         )
-
+        if not self._config.plr_template:
+            plr_template_commit_override = _get_konflux_config(metadata, "plr_template_commitish")
+            if plr_template_commit_override:
+                plr_template_owner, plr_template_branch = plr_template_commit_override.split("@")
+                self._config.plr_template = pyartcd_constants.KONFLUX_IMAGE_BUILD_PLR_TEMPLATE_URL_FORMAT.format(
+                    owner=plr_template_owner, branch_name=plr_template_branch
+                )
         build_params = ImageBuildParams(
             hermetic=hermetic,
             enable_symlink_check=enable_symlink_check,
