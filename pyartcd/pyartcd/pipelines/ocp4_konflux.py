@@ -245,6 +245,9 @@ class KonfluxOcpPipeline:
         - Base image release failures: count:release-failure:konflux:{group}:{image}
 
         Successfully built images reset all three counter types.
+
+        Infrastructure failures (where builds never started due to API/cluster issues)
+        are detected and skip individual image counter updates to avoid false inflation.
         """
         if self.assembly != 'stream':
             return
@@ -256,6 +259,29 @@ class KonfluxOcpPipeline:
         failed_entries = {
             entry['name']: entry for entry in record_log.get('image_build_konflux', []) if int(entry['status'])
         }
+
+        # A build failure only counts if a build was actually triggered.
+        # If task_id=n/a and task_url=n/a, no PipelineRun was created = not a build failure.
+        # Exclude "parent images failed to build" - those never attempted a build either.
+        if failed_images:
+            # Filter out images that never had a build attempt:
+            # 1. Parent dependency failures (never attempted)
+            # 2. Infrastructure failures (task_id=n/a, no PipelineRun created)
+            attempted_builds = [
+                image
+                for image in failed_images
+                if 'parent images failed to build' not in failed_entries.get(image, {}).get('message', '')
+                and failed_entries.get(image, {}).get('task_id') != 'n/a'
+            ]
+
+            # If NO builds were actually attempted, skip all counter updates
+            if not attempted_builds:
+                LOGGER.warning(
+                    f'No builds were actually attempted for {group}: all {len(failed_images)} failures '
+                    f'have task_id=n/a (infrastructure failure) or are parent-dependency failures. '
+                    f'Skipping individual image counter updates. Jenkins job: {job_url}'
+                )
+                return
 
         # Exclude images that failed only because their parent images failed to build.
         # These children were never actually attempted, so incrementing their counters
