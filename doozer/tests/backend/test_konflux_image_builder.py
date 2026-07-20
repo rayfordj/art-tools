@@ -209,6 +209,11 @@ class TestKonfluxImageBuilder(unittest.IsolatedAsyncioTestCase):
                 "get_installed_packages",
                 new=AsyncMock(return_value=({"pkg-1.0-1"}, {"srcpkg-1.0-1"})),
             ) as mock_get_installed_packages,
+            patch.object(
+                self.builder,
+                "_resolve_source_package_nvrs",
+                return_value={"srcpkg-1.0-1"},
+            ),
             patch("doozerlib.backend.konflux_image_builder.bigquery.BigQueryClient") as mock_bigquery_client,
         ):
             mock_dockerfile = MagicMock()
@@ -270,6 +275,11 @@ class TestKonfluxImageBuilder(unittest.IsolatedAsyncioTestCase):
                 "get_installed_packages",
                 new=AsyncMock(return_value=({"pkg-1.0-1"}, {"srcpkg-1.0-1"})),
             ) as mock_get_installed_packages,
+            patch.object(
+                self.builder,
+                "_resolve_source_package_nvrs",
+                return_value={"srcpkg-1.0-1"},
+            ),
             patch("doozerlib.backend.konflux_image_builder.bigquery.BigQueryClient") as mock_bigquery_client,
         ):
             mock_dockerfile = MagicMock()
@@ -339,6 +349,11 @@ class TestKonfluxImageBuilder(unittest.IsolatedAsyncioTestCase):
                 "get_installed_packages",
                 new=AsyncMock(return_value=({"pkg-1.0-1"}, {"srcpkg-1.0-1"})),
             ) as mock_get_installed_packages,
+            patch.object(
+                self.builder,
+                "_resolve_source_package_nvrs",
+                return_value={"srcpkg-1.0-1"},
+            ),
             patch("doozerlib.backend.konflux_image_builder.bigquery.BigQueryClient") as mock_bigquery_client,
         ):
             mock_dockerfile = MagicMock()
@@ -404,6 +419,11 @@ class TestKonfluxImageBuilder(unittest.IsolatedAsyncioTestCase):
                 "get_installed_packages",
                 new=AsyncMock(return_value=({"pkg-1.0-1"}, {"srcpkg-1.0-1"})),
             ),
+            patch.object(
+                self.builder,
+                "_resolve_source_package_nvrs",
+                return_value={"srcpkg-1.0-1"},
+            ),
             patch("doozerlib.backend.konflux_image_builder.bigquery.BigQueryClient") as mock_bigquery_client,
         ):
             mock_dockerfile = MagicMock()
@@ -466,6 +486,11 @@ class TestKonfluxImageBuilder(unittest.IsolatedAsyncioTestCase):
                 self.builder,
                 "get_installed_packages",
                 new=AsyncMock(return_value=({"pkg-1.0-1"}, {"srcpkg-1.0-1"})),
+            ),
+            patch.object(
+                self.builder,
+                "_resolve_source_package_nvrs",
+                return_value={"srcpkg-1.0-1"},
             ),
             patch("doozerlib.backend.konflux_image_builder.bigquery.BigQueryClient") as mock_bigquery_client,
         ):
@@ -595,6 +620,11 @@ class TestKonfluxImageBuilder(unittest.IsolatedAsyncioTestCase):
                 "get_installed_packages",
                 new=AsyncMock(return_value=({"pkg-1.0-1"}, {"srcpkg-1.0-1"})),
             ) as mock_get_installed_packages,
+            patch.object(
+                self.builder,
+                "_resolve_source_package_nvrs",
+                return_value={"srcpkg-1.0-1"},
+            ),
             patch("doozerlib.backend.konflux_image_builder.bigquery.BigQueryClient") as mock_bigquery_client,
         ):
             mock_dockerfile = MagicMock()
@@ -659,6 +689,11 @@ class TestKonfluxImageBuilder(unittest.IsolatedAsyncioTestCase):
                 self.builder,
                 "get_installed_packages",
                 new=AsyncMock(return_value=({"pkg-1.0-1"}, {"srcpkg-1.0-1"})),
+            ),
+            patch.object(
+                self.builder,
+                "_resolve_source_package_nvrs",
+                return_value={"srcpkg-1.0-1"},
             ),
             patch("doozerlib.backend.konflux_image_builder.bigquery.BigQueryClient") as mock_bigquery_client,
         ):
@@ -1389,7 +1424,7 @@ class TestGetInstalledPackages(unittest.IsolatedAsyncioTestCase):
         sbom = self._make_spdx_sbom(
             [
                 self._make_rpm_package(
-                    "pkg:rpm/redhat/gpg-pubkey@5a6340b3-6229229e?distro=rhel-9.8",
+                    "pkg:rpm/redhat/gpg-pubkey@5a6340b3-6229229e?arch=noarch&distro=rhel-9.8",
                     name="gpg-pubkey",
                 ),
                 self._make_rpm_package(
@@ -1519,3 +1554,177 @@ class TestGetInstalledPackages(unittest.IsolatedAsyncioTestCase):
             )
 
         self.assertEqual(package_nvrs, {"acl-2.3.1-4.el9", "bash-5.1.8-9.el9"})
+
+
+class TestResolveSourcePackageNvrs(unittest.TestCase):
+    """Tests for KonfluxImageBuilder._resolve_source_package_nvrs()."""
+
+    def test_empty_source_rpms(self):
+        """Empty set returns empty set."""
+        runtime = MagicMock()
+        result = KonfluxImageBuilder._resolve_source_package_nvrs(set(), runtime)
+        self.assertEqual(result, set())
+
+    def test_all_valid_build_nvrs(self):
+        """NVRs that are already valid Brew builds pass through unchanged."""
+        session = MagicMock()
+        runtime = MagicMock()
+        runtime.shared_koji_client_session.return_value.__enter__ = MagicMock(return_value=session)
+        runtime.shared_koji_client_session.return_value.__exit__ = MagicMock(return_value=False)
+
+        call_count = [0]
+
+        def make_multicall(*args, **kwargs):
+            ctx = MagicMock()
+            call_count[0] += 1
+
+            def make_getBuild(nvr):
+                t = MagicMock()
+                t.result = {"name": "bash", "version": "5.1.8", "release": "9.el9", "build_id": 1}
+                return t
+
+            ctx.getBuild = make_getBuild
+            ctx.__enter__ = MagicMock(return_value=ctx)
+            ctx.__exit__ = MagicMock(return_value=False)
+            return ctx
+
+        session.multicall = make_multicall
+
+        result = KonfluxImageBuilder._resolve_source_package_nvrs({"bash-5.1.8-9.el9"}, runtime)
+        self.assertEqual(result, {"bash-5.1.8-9.el9"})
+
+    def test_binary_nvrs_resolved_to_source(self):
+        """Binary RPM NVR kernel-core resolved to source package NVR kernel."""
+        session = MagicMock()
+        runtime = MagicMock()
+        runtime.shared_koji_client_session.return_value.__enter__ = MagicMock(return_value=session)
+        runtime.shared_koji_client_session.return_value.__exit__ = MagicMock(return_value=False)
+
+        call_count = [0]
+
+        def make_multicall(*args, **kwargs):
+            ctx = MagicMock()
+            idx = call_count[0]
+            call_count[0] += 1
+
+            def make_getBuild(nvr_or_id):
+                t = MagicMock()
+                if idx == 0:
+                    # First call: getBuild("kernel-core-4.18.0-372.el8") -> None
+                    t.result = None
+                else:
+                    # Third call: getBuild(42) -> source package
+                    t.result = {"name": "kernel", "version": "4.18.0", "release": "372.el8"}
+                return t
+
+            def make_getRPM(nvra):
+                t = MagicMock()
+                # Second call: getRPM("kernel-core-4.18.0-372.el8.x86_64") -> build_id
+                t.result = {"build_id": 42}
+                return t
+
+            ctx.getBuild = make_getBuild
+            ctx.getRPM = make_getRPM
+            ctx.__enter__ = MagicMock(return_value=ctx)
+            ctx.__exit__ = MagicMock(return_value=False)
+            return ctx
+
+        session.multicall = make_multicall
+
+        result = KonfluxImageBuilder._resolve_source_package_nvrs({"kernel-core-4.18.0-372.el8"}, runtime)
+        self.assertIn("kernel-4.18.0-372.el8", result)
+        self.assertNotIn("kernel-core-4.18.0-372.el8", result)
+
+    def test_noarch_fallback(self):
+        """Binary RPM not found as x86_64, resolved via noarch."""
+        session = MagicMock()
+        runtime = MagicMock()
+        runtime.shared_koji_client_session.return_value.__enter__ = MagicMock(return_value=session)
+        runtime.shared_koji_client_session.return_value.__exit__ = MagicMock(return_value=False)
+
+        call_count = [0]
+
+        def make_multicall(*args, **kwargs):
+            ctx = MagicMock()
+            idx = call_count[0]
+            call_count[0] += 1
+
+            def make_getBuild(nvr_or_id):
+                t = MagicMock()
+                if idx == 0:
+                    t.result = None  # Not a build NVR
+                elif idx == 3:
+                    t.result = {"name": "basesystem", "version": "11", "release": "5.el8"}
+                else:
+                    t.result = None
+                return t
+
+            def make_getRPM(nvra):
+                t = MagicMock()
+                if idx == 1:
+                    t.result = None  # x86_64 not found
+                else:
+                    t.result = {"build_id": 77}  # noarch found
+                return t
+
+            ctx.getBuild = make_getBuild
+            ctx.getRPM = make_getRPM
+            ctx.__enter__ = MagicMock(return_value=ctx)
+            ctx.__exit__ = MagicMock(return_value=False)
+            return ctx
+
+        session.multicall = make_multicall
+
+        result = KonfluxImageBuilder._resolve_source_package_nvrs({"basesystem-11-5.el8"}, runtime)
+        self.assertIn("basesystem-11-5.el8", result)
+
+    def test_mixed_valid_and_binary_nvrs(self):
+        """Mix of valid build NVRs and binary NVRs both resolved correctly."""
+        session = MagicMock()
+        runtime = MagicMock()
+        runtime.shared_koji_client_session.return_value.__enter__ = MagicMock(return_value=session)
+        runtime.shared_koji_client_session.return_value.__exit__ = MagicMock(return_value=False)
+
+        call_count = [0]
+
+        def make_multicall(*args, **kwargs):
+            ctx = MagicMock()
+            idx = call_count[0]
+            call_count[0] += 1
+            getBuild_calls = [0]
+
+            def make_getBuild(nvr_or_id):
+                t = MagicMock()
+                if idx == 0:
+                    # First multicall: getBuild for both NVRs
+                    call_idx = getBuild_calls[0]
+                    getBuild_calls[0] += 1
+                    if call_idx == 0:
+                        # bash is a valid build NVR
+                        t.result = {"name": "bash", "version": "5.1.8", "release": "9.el9"}
+                    else:
+                        # kernel-core is NOT a valid build NVR
+                        t.result = None
+                else:
+                    # Third multicall: getBuild(build_id) for source package
+                    t.result = {"name": "kernel", "version": "4.18.0", "release": "372.el8"}
+                return t
+
+            def make_getRPM(nvra):
+                t = MagicMock()
+                t.result = {"build_id": 42}
+                return t
+
+            ctx.getBuild = make_getBuild
+            ctx.getRPM = make_getRPM
+            ctx.__enter__ = MagicMock(return_value=ctx)
+            ctx.__exit__ = MagicMock(return_value=False)
+            return ctx
+
+        session.multicall = make_multicall
+
+        source_rpms = {"bash-5.1.8-9.el9", "kernel-core-4.18.0-372.el8"}
+        result = KonfluxImageBuilder._resolve_source_package_nvrs(source_rpms, runtime)
+        self.assertIn("bash-5.1.8-9.el9", result)
+        self.assertIn("kernel-4.18.0-372.el8", result)
+        self.assertNotIn("kernel-core-4.18.0-372.el8", result)
