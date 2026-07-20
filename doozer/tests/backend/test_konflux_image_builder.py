@@ -1171,6 +1171,112 @@ class TestKonfluxImageBuilder(unittest.IsolatedAsyncioTestCase):
         self.assertNotEqual(kwargs["message"], "Unknown failure")
 
 
+class TestStartBuildEnablePackageRegistryProxy(unittest.IsolatedAsyncioTestCase):
+    """Tests for enable_package_registry_proxy config being read and passed to ImageBuildParams."""
+
+    def setUp(self):
+        self.temp_dir = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temp_dir.cleanup)
+
+        self.konflux_client_patcher = patch("doozerlib.backend.konflux_image_builder.KonfluxClient.from_kubeconfig")
+        self.mock_konflux_client_factory = self.konflux_client_patcher.start()
+        self.addCleanup(self.konflux_client_patcher.stop)
+
+        self.mock_konflux_client = MagicMock()
+        self.mock_konflux_client_factory.return_value = self.mock_konflux_client
+        self.mock_konflux_client.resource_url.return_value = "https://example.com/pipelinerun"
+
+        self.builder = KonfluxImageBuilder(
+            KonfluxImageBuilderConfig(
+                base_dir=Path(self.temp_dir.name),
+                group_name="openshift-4.17",
+                namespace="test-namespace",
+                plr_template="test-template",
+                build_priority="5",
+            )
+        )
+
+    def _metadata(self, enable_package_registry_proxy=None):
+        metadata = MagicMock()
+        metadata.distgit_key = "test-image"
+        metadata.qualified_key = "containers/test-image"
+        metadata.image_name_short = "test-image"
+        metadata.build_status = False
+        metadata.build_event = MagicMock()
+        metadata.runtime = MagicMock()
+        metadata.runtime.assembly = "test-assembly"
+        metadata.runtime.konflux_db = MagicMock()
+        metadata.runtime.group_config.get.return_value = {}
+        metadata.config.get.return_value = {}
+        metadata.config.konflux.get.return_value = False
+        metadata.config.konflux.build_timeout = None
+        metadata.get_arches.return_value = ["x86_64"]
+        metadata.get_konflux_network_mode.return_value = "open"
+        metadata.is_cachi2_enabled.return_value = False
+        metadata.get_konflux_build_attempts.return_value = 1
+
+        # Set up the _get_konflux_config pattern:
+        # group-level config
+        group_konflux_config = {}
+        metadata.runtime.group_config.get.side_effect = lambda key, default=None: (
+            group_konflux_config if key == "konflux" else default
+        )
+        # image-level config
+        image_konflux_config = {}
+        if enable_package_registry_proxy is not None:
+            image_konflux_config["enable_package_registry_proxy"] = enable_package_registry_proxy
+
+        def config_get(key, default=None):
+            if key == "konflux":
+                return image_konflux_config
+            return default
+
+        metadata.config.get.side_effect = config_get
+
+        return metadata
+
+    async def _run_start_build(self, enable_package_registry_proxy=None):
+        """Helper to call _start_build with metadata configured for enable_package_registry_proxy."""
+        metadata = self._metadata(enable_package_registry_proxy=enable_package_registry_proxy)
+
+        build_repo = MagicMock()
+        build_repo.commit_hash = "abc123"
+        build_repo.branch = "test-branch"
+        build_repo.https_url = "https://github.com/test/repo.git"
+
+        mock_plr = MagicMock()
+        mock_plr.name = "test-plr"
+        mock_plr.to_dict.return_value = {"metadata": {"name": "test-plr"}}
+
+        self.mock_konflux_client.ensure_application = AsyncMock()
+        self.mock_konflux_client.ensure_component = AsyncMock()
+        self.mock_konflux_client.start_pipeline_run_for_image_build = AsyncMock(return_value=mock_plr)
+
+        await self.builder._start_build(
+            metadata=metadata,
+            build_repo=build_repo,
+            building_arches=["x86_64"],
+            output_image="quay.io/test:tag",
+            additional_tags=["tag1"],
+            nvr="test-1.0-1",
+            build_priority="5",
+        )
+
+        call = self.mock_konflux_client.start_pipeline_run_for_image_build
+        call.assert_called_once()
+        return call.call_args.kwargs.get("build_params") or call.call_args[1].get("build_params")
+
+    async def test_enable_package_registry_proxy_false_passed_to_build_params(self):
+        """Test that enable_package_registry_proxy=False from config is passed to ImageBuildParams."""
+        build_params = await self._run_start_build(enable_package_registry_proxy=False)
+        self.assertFalse(build_params.enable_package_registry_proxy)
+
+    async def test_enable_package_registry_proxy_none_when_not_configured(self):
+        """Test that enable_package_registry_proxy is None when not set in config."""
+        build_params = await self._run_start_build(enable_package_registry_proxy=None)
+        self.assertIsNone(build_params.enable_package_registry_proxy)
+
+
 class TestNormalizeVersion(unittest.TestCase):
     """
     Tests for _normalize_version.

@@ -545,6 +545,17 @@
           "$ref": "#/properties/konflux/properties/enable_symlink_check"
         },
         "enable_symlink_check-": {},
+        "enable_package_registry_proxy": {
+          "description": "Enable the package registry proxy in the build pipeline. Defaults to true if not specified.",
+          "type": "boolean"
+        },
+        "enable_package_registry_proxy!": {
+          "$ref": "#/properties/konflux/properties/enable_package_registry_proxy"
+        },
+        "enable_package_registry_proxy?": {
+          "$ref": "#/properties/konflux/properties/enable_package_registry_proxy"
+        },
+        "enable_package_registry_proxy-": {},
         "clone_git_tags": {
           "description": "Whether the clone-repository task fetches git tags. Defaults to true if not specified.",
           "type": "boolean"

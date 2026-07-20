@@ -688,6 +688,52 @@ class TestNewPipelinerunEnableSymlinkCheck(IsolatedAsyncioTestCase):
         self.assertNotIn("enableSymlinkCheck", task_param_names)
 
 
+class TestNewPipelinerunEnablePackageRegistryProxy(IsolatedAsyncioTestCase):
+    """Tests for enable_package_registry_proxy in _new_pipelinerun_for_image_build."""
+
+    @patch("doozerlib.backend.konflux_client.KonfluxClient._get_pipelinerun_template")
+    async def test_enable_package_registry_proxy_false_sets_param(self, mock_get_template):
+        """Test that enable_package_registry_proxy=False sets enable-package-registry-proxy to 'false'."""
+        client = _make_mock_client(mock_get_template)
+
+        result = await client._new_pipelinerun_for_image_build(
+            **_COMMON_KWARGS,
+            build_params=ImageBuildParams(enable_package_registry_proxy=False),
+        )
+
+        plr_params = result["spec"]["params"]
+        param_dict = {p["name"]: p["value"] for p in plr_params}
+        self.assertEqual(param_dict["enable-package-registry-proxy"], "false")
+
+    @patch("doozerlib.backend.konflux_client.KonfluxClient._get_pipelinerun_template")
+    async def test_enable_package_registry_proxy_true_sets_param(self, mock_get_template):
+        """Test that enable_package_registry_proxy=True sets enable-package-registry-proxy to 'true'."""
+        client = _make_mock_client(mock_get_template)
+
+        result = await client._new_pipelinerun_for_image_build(
+            **_COMMON_KWARGS,
+            build_params=ImageBuildParams(enable_package_registry_proxy=True),
+        )
+
+        plr_params = result["spec"]["params"]
+        param_dict = {p["name"]: p["value"] for p in plr_params}
+        self.assertEqual(param_dict["enable-package-registry-proxy"], "true")
+
+    @patch("doozerlib.backend.konflux_client.KonfluxClient._get_pipelinerun_template")
+    async def test_enable_package_registry_proxy_none_is_noop(self, mock_get_template):
+        """Test that None enable_package_registry_proxy doesn't set the param (lets pipeline default apply)."""
+        client = _make_mock_client(mock_get_template)
+
+        result = await client._new_pipelinerun_for_image_build(
+            **_COMMON_KWARGS,
+            build_params=ImageBuildParams(enable_package_registry_proxy=None),
+        )
+
+        plr_params = result["spec"]["params"]
+        param_dict = {p["name"]: p["value"] for p in plr_params}
+        self.assertNotIn("enable-package-registry-proxy", param_dict)
+
+
 class TestNewPipelinerunFetchTags(IsolatedAsyncioTestCase):
     """Tests for fetch_tags in _new_pipelinerun_for_image_build."""
 

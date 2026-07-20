@@ -775,6 +775,9 @@ class KonfluxImageBuilder:
         raw_symlink_check = _get_konflux_config(metadata, "enable_symlink_check")
         enable_symlink_check = bool(raw_symlink_check) if raw_symlink_check is not None else None
 
+        raw_pkg_registry_proxy = _get_konflux_config(metadata, "enable_package_registry_proxy")
+        enable_package_registry_proxy = bool(raw_pkg_registry_proxy) if raw_pkg_registry_proxy is not None else None
+
         raw_fetch_tags = _get_konflux_config(metadata, "clone_git_tags", True)
         fetch_tags = bool(raw_fetch_tags) if raw_fetch_tags is not None else None
 
@@ -795,6 +798,7 @@ class KonfluxImageBuilder:
         build_params = ImageBuildParams(
             hermetic=hermetic,
             enable_symlink_check=enable_symlink_check,
+            enable_package_registry_proxy=enable_package_registry_proxy,
             fetch_tags=fetch_tags,
             prefetch=prefetch,
             prefetch_mode=prefetch_mode,
