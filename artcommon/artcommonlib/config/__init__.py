@@ -202,6 +202,11 @@ class BuildDataLoader:
             if releases_config is None:
                 releases_config = self.load_releases_config(config_file=None)
             group_config = assembly_field(releases_config, assembly, "group", group_config)
+        if variables:
+            resolved_vars = group_config.get('vars')
+            if 'vars' in group_config and not isinstance(resolved_vars, dict):
+                raise TypeError("The 'vars' field in group configuration must be a dictionary if present.")
+            group_config['vars'] = {**(resolved_vars or {}), **(additional_vars or {})}
         return group_config
 
     def load_releases_config(self, config_file: str | None = None) -> dict:
