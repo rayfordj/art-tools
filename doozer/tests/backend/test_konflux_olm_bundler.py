@@ -15,6 +15,7 @@ from doozerlib.backend.konflux_olm_bundler import (
     KonfluxOlmBundleBuilder,
     KonfluxOlmBundleRebaseError,
     KonfluxOlmBundleRebaser,
+    _replace_pullspec,
 )
 from doozerlib.backend.pipelinerun_utils import PipelineRunInfo
 
@@ -583,8 +584,9 @@ spec:
             await self.rebaser._rebase_dir(metadata, operator_dir, bundle_dir, MagicMock(), input_release)
             self.assertIn("No files found in bundle directory", str(context.exception))
 
+    @patch("doozerlib.backend.konflux_olm_bundler.is_nvr_embargoed", return_value=False)
     @patch("doozerlib.util.oc_image_info_for_arch_async")
-    async def test_resolve_operands_from_db(self, mock_oc_image_info):
+    async def test_resolve_operands_from_db(self, mock_oc_image_info, _mock_is_embargoed):
         """
         Verify that _resolve_operands_from_db resolves operand NVRs from the
         Konflux DB and returns correctly-formed pullspecs and NVRs.
@@ -633,14 +635,13 @@ spec:
         self.rebaser._group_config.operator_image_ref_mode = "manifest-list"
         self.rebaser._group_config.vars = {"MAJOR": 4}
 
-        resolved, rebased_name_map = await self.rebaser._resolve_operands_from_db(metadata, image_references, {}, {})
+        resolved = await self.rebaser._resolve_operands_from_db(metadata, image_references, {}, {})
 
         self.assertIn("ose-operand", resolved)
         old_spec, new_pullspec, nvr = resolved["ose-operand"]
         self.assertEqual(old_spec, "registry.example.com/openshift/ose-operand:v4.18")
         self.assertIn("registry.redhat.io/openshift4/ose-operand@sha256:abc123def456", new_pullspec)
         self.assertEqual(nvr, "operand-container-4.18.0-202506120000.p0.g1234567.assembly.stream.el9")
-        self.assertEqual(rebased_name_map["ose-operand"], "ose-operand")
 
         # Verify DB query was made directly to Konflux
         operand_meta.get_latest_konflux_build.assert_called_once_with(
@@ -648,8 +649,9 @@ spec:
             exclude_large_columns=True,
         )
 
+    @patch("doozerlib.backend.konflux_olm_bundler.is_nvr_embargoed", return_value=False)
     @patch("doozerlib.util.oc_image_info_for_arch_async")
-    async def test_resolve_operands_from_db_by_arch_mode(self, mock_oc_image_info):
+    async def test_resolve_operands_from_db_by_arch_mode(self, mock_oc_image_info, _mock_is_embargoed):
         """
         Verify that by-arch mode uses contentDigest instead of listDigest.
         """
@@ -695,7 +697,7 @@ spec:
         self.rebaser._group_config.operator_image_ref_mode = "by-arch"
         self.rebaser._group_config.vars = {"MAJOR": 4}
 
-        resolved, _rebased_name_map = await self.rebaser._resolve_operands_from_db(metadata, image_references, {}, {})
+        resolved = await self.rebaser._resolve_operands_from_db(metadata, image_references, {}, {})
 
         _, new_pullspec, _ = resolved["ose-operand"]
         self.assertIn("sha256:content222", new_pullspec)
@@ -774,8 +776,9 @@ spec:
             await self.rebaser._resolve_operands_from_db(metadata, image_references, {}, {})
         self.assertIn("Could not find latest Konflux build", str(ctx.exception))
 
+    @patch("doozerlib.backend.konflux_olm_bundler.is_nvr_embargoed", return_value=False)
     @patch("doozerlib.util.oc_image_info_for_arch_async")
-    async def test_resolve_operands_with_delivery_override(self, mock_oc_image_info):
+    async def test_resolve_operands_with_delivery_override(self, mock_oc_image_info, _mock_is_embargoed):
         """
         Verify delivery_repo_name_override mapping works in _resolve_operands_from_db.
         """
@@ -841,7 +844,7 @@ spec:
             )
 
             delivery_override_map, delivery_namespace_map = self.rebaser._build_delivery_maps(metadata)
-            resolved, _rebased_name_map = await self.rebaser._resolve_operands_from_db(
+            resolved = await self.rebaser._resolve_operands_from_db(
                 metadata, image_references, delivery_override_map, delivery_namespace_map
             )
 
@@ -850,8 +853,9 @@ spec:
         _, new_pullspec, _ = resolved["ose-csi-driver-rhel9"]
         self.assertIn("ose-csi-driver-rhel9", new_pullspec)
 
+    @patch("doozerlib.backend.konflux_olm_bundler.is_nvr_embargoed", return_value=False)
     @patch("doozerlib.util.oc_image_info_for_arch_async")
-    async def test_resolve_operands_from_db_layered_upstream_registry(self, mock_oc_image_info):
+    async def test_resolve_operands_from_db_layered_upstream_registry(self, mock_oc_image_info, _mock_is_embargoed):
         """
         Verify that for a layered product (e.g. OADP) whose image-references
         point to an upstream registry (quay.io/konveyor/*), the delivery
@@ -913,7 +917,7 @@ spec:
         self.rebaser._group_config.vars = {"MAJOR": 4}
 
         delivery_namespace_map = {"oadp-velero-rhel9": "oadp"}
-        resolved, rebased_name_map = await self.rebaser._resolve_operands_from_db(
+        resolved = await self.rebaser._resolve_operands_from_db(
             metadata,
             image_references,
             {},
@@ -926,7 +930,121 @@ spec:
         self.assertEqual(new_pullspec, "registry.redhat.io/oadp/oadp-velero-rhel9@sha256:oadpvelerodigest111")
         self.assertNotIn("konveyor", new_pullspec)
         self.assertEqual(nvr, "oadp-velero-container-1.5.8-202507160000.p0.g1234567.assembly.stream.el9")
-        self.assertEqual(rebased_name_map["oadp-velero-rhel9"], "oadp-velero-rhel9")
+
+    @patch("doozerlib.backend.konflux_olm_bundler.is_nvr_embargoed")
+    @patch("doozerlib.util.oc_image_info_for_arch_async")
+    async def test_resolve_operands_from_db_embargo_substitution(self, mock_oc_image_info, mock_is_embargoed):
+        """
+        Verify that embargoed operand builds are substituted with the latest
+        public (non-embargoed) build.
+        """
+        metadata = MagicMock()
+        metadata.distgit_key = "test-operator"
+        metadata.runtime.group = "mtc-1.8"
+        metadata.runtime.data_dir = "/nonexistent/data/dir"
+
+        operand_meta = MagicMock()
+        operand_meta.image_name_short = "ose-operand"
+        operand_meta.distgit_key = "operand"
+        operand_meta.branch_el_target.return_value = 9
+
+        # Latest build is embargoed (p3 suffix)
+        embargoed_build = MagicMock()
+        embargoed_build.version = "4.18.0"
+        embargoed_build.release = "202506120000.p3.g1234567.assembly.stream.el9"
+        embargoed_build.nvr = "operand-container-4.18.0-202506120000.p3.g1234567.assembly.stream.el9"
+
+        # Public substitute build
+        public_build = MagicMock()
+        public_build.version = "4.18.0"
+        public_build.release = "202506100000.p2.gabcdef0.assembly.stream.el9"
+        public_build.nvr = "operand-container-4.18.0-202506100000.p2.gabcdef0.assembly.stream.el9"
+
+        # First call returns embargoed, second (with embargoed=False) returns public
+        operand_meta.get_latest_konflux_build = AsyncMock(side_effect=[embargoed_build, public_build])
+
+        metadata.runtime.name_in_bundle_map = {"operand-image": "operand"}
+        metadata.runtime.image_map = {"operand": operand_meta}
+
+        image_references = {
+            "operand-image": {
+                "name": "operand-image",
+                "from": {"name": "registry.example.com/openshift/ose-operand:v4.18"},
+            },
+        }
+
+        mock_is_embargoed.return_value = True
+
+        mock_oc_image_info.return_value = {
+            "config": {
+                "config": {
+                    "Labels": {
+                        "com.redhat.component": "operand-container",
+                        "version": "4.18.0",
+                        "release": "202506100000.p2.gabcdef0.assembly.stream.el9",
+                    }
+                }
+            },
+            "listDigest": "sha256:publicdigest111",
+            "contentDigest": "sha256:publiccontent222",
+        }
+        self.rebaser._group_config.get.return_value = "openshift"
+        self.rebaser._group_config.operator_image_ref_mode = "manifest-list"
+        self.rebaser._group_config.vars = {"MAJOR": 4}
+
+        resolved = await self.rebaser._resolve_operands_from_db(metadata, image_references, {}, {})
+
+        self.assertIn("ose-operand", resolved)
+        _, new_pullspec, nvr = resolved["ose-operand"]
+        # Should use the public build's digest and NVR, not the embargoed one
+        self.assertIn("sha256:publicdigest111", new_pullspec)
+        self.assertEqual(nvr, "operand-container-4.18.0-202506100000.p2.gabcdef0.assembly.stream.el9")
+
+        # Verify the public build was fetched with embargoed=False
+        calls = operand_meta.get_latest_konflux_build.call_args_list
+        self.assertEqual(len(calls), 2)
+        self.assertEqual(calls[1].kwargs.get("embargoed"), False)
+
+    @patch("doozerlib.backend.konflux_olm_bundler.is_nvr_embargoed")
+    async def test_resolve_operands_from_db_embargo_no_public_build(self, mock_is_embargoed):
+        """
+        Verify that KonfluxOlmBundleRebaseError is raised when an embargoed operand
+        has no public build available to substitute.
+        """
+        metadata = MagicMock()
+        metadata.distgit_key = "test-operator"
+        metadata.runtime.group = "mtc-1.8"
+        metadata.runtime.data_dir = "/nonexistent/data/dir"
+
+        operand_meta = MagicMock()
+        operand_meta.image_name_short = "ose-operand"
+        operand_meta.distgit_key = "operand"
+        operand_meta.branch_el_target.return_value = 9
+
+        embargoed_build = MagicMock()
+        embargoed_build.version = "4.18.0"
+        embargoed_build.release = "202506120000.p3.g1234567.assembly.stream.el9"
+        embargoed_build.nvr = "operand-container-4.18.0-202506120000.p3.g1234567.assembly.stream.el9"
+
+        # First call returns embargoed, second returns None (no public build)
+        operand_meta.get_latest_konflux_build = AsyncMock(side_effect=[embargoed_build, None])
+
+        metadata.runtime.name_in_bundle_map = {"operand-image": "operand"}
+        metadata.runtime.image_map = {"operand": operand_meta}
+
+        image_references = {
+            "operand-image": {
+                "name": "operand-image",
+                "from": {"name": "registry.example.com/openshift/ose-operand:v4.18"},
+            },
+        }
+
+        mock_is_embargoed.return_value = True
+
+        with self.assertRaises(KonfluxOlmBundleRebaseError) as ctx:
+            await self.rebaser._resolve_operands_from_db(metadata, image_references, {}, {})
+        self.assertIn("embargoed", str(ctx.exception))
+        self.assertIn("no public", str(ctx.exception).lower())
 
     @patch("pathlib.Path.iterdir")
     @patch("pathlib.Path.exists", autospec=True)
@@ -953,8 +1071,8 @@ spec:
     ):
         """
         Verify that _rebase_dir uses _resolve_operands_from_db for Konflux engine
-        and that regex-based replacement correctly handles predicted tags in the CSV
-        (which differ from the original specs in image-references).
+        and that direct upstream spec replacement correctly replaces original specs
+        from image-references with DB-resolved SHA pullspecs.
         """
         metadata = MagicMock()
         metadata.config = {
@@ -983,7 +1101,7 @@ spec:
             {
                 "spec": {
                     "tags": [
-                        {"name": "operand-a", "from": {"name": "registry.example.com/openshift/ose-operand-a:v4.18"}},
+                        {"name": "operand-a", "from": {"name": "quay.io/upstream/operand-a:v1.8"}},
                     ]
                 }
             }
@@ -995,7 +1113,8 @@ spec:
             }
         )
 
-        # CSV content has PREDICTED tags from operator rebase, NOT the original specs
+        # CSV content retains ORIGINAL upstream specs (operator rebase no longer
+        # writes predicted tags for layered products — ART-18061)
         csv_content = (
             "apiVersion: operators.coreos.com/v1alpha1\n"
             "kind: ClusterServiceVersion\n"
@@ -1010,7 +1129,7 @@ spec:
             "          template:\n"
             "            spec:\n"
             "              containers:\n"
-            "              - image: registry.example.com/openshift/ose-operand-a:4.18.0-202506120000.p0.assembly.stream.el9\n"
+            "              - image: quay.io/upstream/operand-a:v1.8\n"
         )
 
         read_call_count = [0]
@@ -1038,23 +1157,19 @@ spec:
         mock_iterdir.side_effect = lambda: iter(bundle_files)
 
         mock_build_delivery_maps.return_value = ({}, {})
-        mock_resolve_operands.return_value = (
-            {
-                "ose-operand-a": (
-                    "registry.example.com/openshift/ose-operand-a:v4.18",
-                    "registry.redhat.io/openshift4/ose-operand-a@sha256:abc123",
-                    "operand-a-container-4.18.0-1.el9",
-                ),
-            },
-            {"ose-operand-a": "ose-operand-a"},
-        )
+        mock_resolve_operands.return_value = {
+            "ose-operand-a": (
+                "quay.io/upstream/operand-a:v1.8",
+                "registry.redhat.io/openshift4/ose-operand-a@sha256:abc123",
+                "operand-a-container-4.18.0-1.el9",
+            ),
+        }
 
         await self.rebaser._rebase_dir(metadata, operator_dir, bundle_dir, operator_build, input_release)
 
         mock_resolve_operands.assert_called_once()
 
-        # Verify the predicted tag was replaced with the DB-resolved SHA pullspec
-        # by checking what was written to the CSV file
+        # Verify the upstream spec was replaced with the DB-resolved SHA pullspec
         write_calls = mock_file.write.call_args_list
         csv_written = None
         for call in write_calls:
@@ -1064,7 +1179,7 @@ spec:
                 break
         self.assertIsNotNone(csv_written, "CSV content was not written")
         self.assertIn("sha256:abc123", csv_written)
-        self.assertNotIn("4.18.0-202506120000.p0.assembly.stream.el9", csv_written)
+        self.assertNotIn("quay.io/upstream/operand-a:v1.8", csv_written)
 
         # Verify operands passed to _create_oit_files include DB-resolved data
         mock_create_oit_files.assert_called_once()
@@ -1842,3 +1957,51 @@ class TestReplaceImageReferencesEmbargo(IsolatedAsyncioTestCase):
         self.assertIn('registry.redhat.io/openshift4/my-embargoed-operand-rhel9@sha256:embargoed-list', new_content)
         # The lazy component-metadata map should never be built for the Brew engine.
         metadata.runtime.image_metas.assert_not_called()
+
+
+class TestReplacePullspec(IsolatedAsyncioTestCase):
+    """
+    Tests for the _replace_pullspec boundary-aware replacement helper.
+    """
+
+    def test_basic_replacement(self):
+        content = "image: registry.redhat.io/foo/bar:v1.0\n"
+        result = _replace_pullspec(
+            content, "registry.redhat.io/foo/bar:v1.0", "registry.redhat.io/foo/bar@sha256:abc123"
+        )
+        self.assertEqual(result, "image: registry.redhat.io/foo/bar@sha256:abc123\n")
+
+    def test_no_match(self):
+        content = "image: registry.redhat.io/foo/other:v2.0\n"
+        result = _replace_pullspec(
+            content, "registry.redhat.io/foo/bar:v1.0", "registry.redhat.io/foo/bar@sha256:abc123"
+        )
+        self.assertEqual(result, content)
+
+    def test_overlapping_tags_not_corrupted(self):
+        """
+        Replacing 'image:v1.0' must NOT corrupt 'image:v1.0.1' — the shorter
+        spec is a substring of the longer one.
+        """
+        content = "image: registry.redhat.io/foo/bar:v1.0.1\nimage: registry.redhat.io/foo/bar:v1.0\n"
+        result = _replace_pullspec(
+            content, "registry.redhat.io/foo/bar:v1.0", "registry.redhat.io/foo/bar@sha256:short"
+        )
+        self.assertIn("registry.redhat.io/foo/bar:v1.0.1", result, "longer tag must be preserved")
+        self.assertIn("registry.redhat.io/foo/bar@sha256:short", result, "exact match must be replaced")
+        self.assertNotIn("registry.redhat.io/foo/bar@sha256:short.1", result, "must not create corrupted pullspec")
+
+    def test_multiple_occurrences(self):
+        content = "a: registry.redhat.io/foo:v1\nb: registry.redhat.io/foo:v1\n"
+        result = _replace_pullspec(content, "registry.redhat.io/foo:v1", "registry.redhat.io/foo@sha256:xyz")
+        self.assertEqual(result.count("registry.redhat.io/foo@sha256:xyz"), 2)
+
+    def test_quoted_yaml_value(self):
+        content = 'image: "registry.redhat.io/foo/bar:v1.0"\n'
+        result = _replace_pullspec(content, "registry.redhat.io/foo/bar:v1.0", "registry.redhat.io/foo/bar@sha256:abc")
+        self.assertEqual(result, 'image: "registry.redhat.io/foo/bar@sha256:abc"\n')
+
+    def test_spec_at_start_and_end(self):
+        content = "registry.redhat.io/foo:v1"
+        result = _replace_pullspec(content, "registry.redhat.io/foo:v1", "registry.redhat.io/foo@sha256:abc")
+        self.assertEqual(result, "registry.redhat.io/foo@sha256:abc")
