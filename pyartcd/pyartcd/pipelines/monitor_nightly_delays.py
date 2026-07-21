@@ -12,9 +12,6 @@ from pyartcd import util
 from pyartcd.cli import cli, click_coroutine, pass_runtime
 from pyartcd.runtime import Runtime
 
-# Pre-release 12h (TRT) critical alerts always go here, regardless of --trt-channel.
-TRT_NIGHTLY_DELAY_SLACK_CHANNEL = "#art-release-4.23"
-
 
 class MonitorNightlyDelaysPipeline:
     """
@@ -258,8 +255,7 @@ class MonitorNightlyDelaysPipeline:
         self._logger.error(f"12-hour delay detected for {self.group}")
 
         # Send alert to TRT channel
-        # self._slack_client.bind_channel(self.trt_channel)
-        self._slack_client.bind_channel(TRT_NIGHTLY_DELAY_SLACK_CHANNEL)
+        self._slack_client.bind_channel(self.trt_channel)
 
         message = (
             f":rotating_light: *CRITICAL: Nightly Build Delay Alert for {self._ocp_version}* :rotating_light:\n\n"
@@ -279,8 +275,7 @@ class MonitorNightlyDelaysPipeline:
                 self._slack_client.bind_channel(self.release_artists_channel)
                 await self._slack_client.say(
                     f":rotating_light: *CRITICAL: 12-hour nightly delay for {self._ocp_version}* - "
-                    # f"see alert in {self.trt_channel}"
-                    f"see alert in {TRT_NIGHTLY_DELAY_SLACK_CHANNEL}"
+                    f"see alert in {self.trt_channel}"
                 )
 
         # Mark this nightly as alerted (store with 48h expiry)
@@ -317,8 +312,7 @@ class MonitorNightlyDelaysPipeline:
 @click.option(
     '--trt-channel',
     default='#forum-ocp-release-oversight',
-    # help='Slack channel to ping TRT team (default: #forum-ocp-release-oversight)',
-    help='Ignored: 12h TRT alerts use fixed channel #art-release-4.23. Kept for CLI compatibility.',
+    help='Slack channel to ping TRT team (default: #forum-ocp-release-oversight)',
 )
 @pass_runtime
 @click_coroutine
