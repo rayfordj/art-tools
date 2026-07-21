@@ -45,7 +45,7 @@ class Jobs(Enum):
     MICROSHIFT_SYNC = 'aos-cd-builds/build%2Fmicroshift_sync'
     CINCINNATI_PRS = 'aos-cd-builds/build%2Fcincinnati-prs'
     RHCOS_SYNC = 'aos-cd-builds/build%2Frhcos_sync'
-    BUILD_PLASHETS = 'aos-cd-builds/build%2Fbuild-plashets'
+    BUILD_PLASHETS = 'aos-cd-jobs/build%2Fbuild-plashets'
     BUILD_FBC = 'aos-cd-builds/build%2Fbuild-fbc'
     LAYERED_PRODUCTS = 'aos-cd-builds/build%2Flayered-products'
     LAYERED_PRODUCTS_SCAN = 'aos-cd-builds/build%2Flayered-products-scan'
@@ -774,7 +774,16 @@ def start_rhcos_sync(release_tag_or_pullspec: str, dry_run: bool, sign_only: boo
 
 
 def start_build_plashets(
-    group, release, assembly, repos=None, data_path='', data_gitref='', copy_links=False, dry_run=False, **kwargs
+    group,
+    release,
+    assembly,
+    repos=None,
+    data_path='',
+    data_gitref='',
+    copy_links=False,
+    dry_run=False,
+    version=None,
+    **kwargs,
 ) -> Optional[str]:
     params = {
         'GROUP': group,
@@ -785,6 +794,7 @@ def start_build_plashets(
         'DATA_GITREF': data_gitref,
         'COPY_LINKS': copy_links,
         'DRY_RUN': dry_run,
+        'VERSION': version,
     }
 
     return start_build(

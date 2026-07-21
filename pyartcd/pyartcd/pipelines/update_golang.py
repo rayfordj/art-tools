@@ -597,7 +597,10 @@ class UpdateGolangPipeline:
         """Check sign_golang_rpm in the golang branch group.yml.
         Defaults to False so that RHEL-shipped golang is never accidentally signed by us.
         """
-        default_branch = self.get_golang_branch(el_v, go_version)
+        if self.use_new_golang_branch:
+            default_branch = self.GOLANG_DATA_BRANCH
+        else:
+            default_branch = self.get_golang_branch(el_v, go_version)
         repo, branch = self._get_ocp_build_data_repo_and_branch(default_branch)
         content = repo.get_contents("group.yml", ref=branch)
         group_config = yaml.load(content.decoded_content)
@@ -608,19 +611,26 @@ class UpdateGolangPipeline:
         _LOGGER.info("Building golang plashets for go %s, RHEL versions: %s", go_v, list(el_versions))
 
         for el_v in el_versions:
-            group = f"rhel-{el_v}-golang-{go_v}"
+            if self.use_new_golang_branch:
+                group = self.GOLANG_DATA_BRANCH
+                version = self.ocp_version
+            else:
+                group = self.get_golang_branch(el_v, go_version)
+                version = None
             repo_name = f"rhel-{el_v}-golang-rpms"
             _LOGGER.info("Triggering plashet build for group=%s, repo=%s", group, repo_name)
             await self._slack_client.say_in_thread(f"Building golang plashet: group={group}, repo={repo_name}")
-            if self.dry_run:
-                _LOGGER.info("[DRY RUN] Would have triggered build-plashets for %s", group)
-                continue
+
             result = jenkins.start_build_plashets(
                 group=group,
                 release=default_release_suffix(),
                 assembly="stream",
                 repos=[repo_name],
+                version=version,
                 block_until_complete=True,
+                dry_run=self.dry_run,
+                data_path=self.data_path,
+                data_gitref=self.data_gitref,
             )
             if result != "SUCCESS":
                 raise RuntimeError(f"Plashet build for {group} failed with result: {result}")
@@ -1169,9 +1179,8 @@ class UpdateGolangPipeline:
     help='Override network mode for Konflux builds. Takes precedence over image and group config settings.',
 )
 @click.option(
-    '--use-new-golang-branch',
-    is_flag=True,
-    default=False,
+    '--use-new-golang-branch/--no-use-new-golang-branch',
+    default=True,
     help='Use the unified "golang" branch layout in ocp-build-data instead of per-variant branches (e.g. rhel-9-golang-1.26).',
 )
 @click.option(
@@ -1217,7 +1226,7 @@ async def update_golang(
     if network_mode and build_system == 'brew':
         raise click.BadParameter('--network-mode only applies when --build-system is "konflux" or "both".')
 
-    await UpdateGolangPipeline(
+    pipeline = UpdateGolangPipeline(
         runtime,
         ocp_version,
         cves_list,
@@ -1236,4 +1245,16 @@ async def update_golang(
         network_mode,
         use_new_golang_branch,
         major_bump,
-    ).run()
+    )
+    try:
+        await pipeline.run()
+    except Exception as e:
+        if use_new_golang_branch:
+            _LOGGER.error("Golang monobranch build failed: %s", e)
+            slack_client = runtime.new_slack_client()
+            slack_client.bind_channel(ocp_version)
+            await slack_client.say(
+                f":warning: [GOLANG MONOBRANCH FAILURE] update-golang for {ocp_version} failed "
+                f"using the unified golang branch: {e}"
+            )
+        raise
