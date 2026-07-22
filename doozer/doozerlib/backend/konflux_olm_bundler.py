@@ -319,6 +319,20 @@ class KonfluxOlmBundleRebaser:
                 found_images: dict[str, tuple[str, str, str]] = {}
                 for delivery_name, (upstream_spec, new_pullspec, operand_nvr) in resolved_operands.items():
                     replaced_content = _replace_pullspec(content, upstream_spec, new_pullspec)
+                    if replaced_content == content and ":" in upstream_spec and "@" not in upstream_spec:
+                        # Exact upstream spec not found. art.yaml may have modified the tag
+                        # during operator rebase (e.g. :0.1.0 → :6.0.16). Fall back to
+                        # registry/repo prefix matching.
+                        repo = upstream_spec.rsplit(":", 1)[0]
+                        pattern = re.compile(re.escape(repo) + r":[a-zA-Z0-9._-]+")
+                        match = pattern.search(content)
+                        if match:
+                            logger.info(
+                                "Upstream spec %s not found in CSV; matched art.yaml-modified spec %s",
+                                upstream_spec,
+                                match.group(0),
+                            )
+                            replaced_content = _replace_pullspec(content, match.group(0), new_pullspec)
                     if replaced_content != content:
                         content = replaced_content
                         found_images[delivery_name] = (upstream_spec, new_pullspec, operand_nvr)
