@@ -1188,6 +1188,147 @@ spec:
         self.assertEqual(operands_arg["ose-operand-a"][2], "operand-a-container-4.18.0-1.el9")
 
     @patch("pathlib.Path.iterdir")
+    @patch("pathlib.Path.exists", autospec=True)
+    @patch("pathlib.Path.glob")
+    @patch("aiofiles.open")
+    @patch("pathlib.Path.mkdir")
+    @patch("glob.glob")
+    @patch("doozerlib.backend.konflux_olm_bundler.KonfluxOlmBundleRebaser._build_delivery_maps")
+    @patch("doozerlib.backend.konflux_olm_bundler.KonfluxOlmBundleRebaser._resolve_operands_from_db")
+    @patch("doozerlib.backend.konflux_olm_bundler.KonfluxOlmBundleRebaser._create_dockerfile")
+    @patch("doozerlib.backend.konflux_olm_bundler.KonfluxOlmBundleRebaser._create_oit_files")
+    async def test_rebase_dir_art_yaml_modified_tag(
+        self,
+        mock_create_oit_files,
+        mock_create_dockerfile,
+        mock_resolve_operands,
+        mock_build_delivery_maps,
+        mock_glob,
+        mock_mkdir,
+        mock_open,
+        mock_path_glob,
+        mock_path_exists,
+        mock_iterdir,
+    ):
+        """
+        Verify that the bundle rebaser handles art.yaml-modified tags.
+
+        When art.yaml changes the tag in the CSV during operator rebase
+        (e.g. :0.1.0 → :6.0.16), the upstream spec from image-references
+        no longer matches the CSV content. The fallback should find the
+        modified spec by registry/repo prefix and replace it.
+        """
+        metadata = MagicMock()
+        metadata.config = {
+            "update-csv": {
+                "manifests-dir": "manifests",
+                "bundle-dir": "bundle",
+                "valid-subscription-label": "valid-subscription",
+                "registry": "registry.example.com",
+            },
+        }
+        metadata.distgit_key = "loki-operator"
+        metadata.runtime.group = "logging-6.0"
+
+        operator_dir = Path("/path/to/operator/dir")
+        bundle_dir = Path("/path/to/bundle/dir")
+        input_release = "6.0.16-1"
+
+        operator_build = MagicMock()
+        operator_build.engine = Engine.KONFLUX
+        operator_build.nvr = "loki-operator-6.0.16-1"
+
+        mock_glob.return_value = ["/path/to/operator/dir/manifests/package.yaml"]
+
+        # image-references has the ORIGINAL upstream tag (:0.1.0)
+        image_refs_yaml = yaml.safe_dump(
+            {
+                "spec": {
+                    "tags": [
+                        {
+                            "name": "loki-rhel9-operator",
+                            "from": {"name": "quay.io/openshift-logging/loki-operator:0.1.0"},
+                        },
+                    ]
+                }
+            }
+        )
+        package_yaml = yaml.safe_dump(
+            {
+                "packageName": "loki-operator",
+                "channels": [{"name": "stable-6.0", "currentCSV": "loki-operator.v6.0.16"}],
+            }
+        )
+
+        # CSV has the art.yaml-MODIFIED tag (:6.0.16), not the original (:0.1.0)
+        csv_content = (
+            "apiVersion: operators.coreos.com/v1alpha1\n"
+            "kind: ClusterServiceVersion\n"
+            "metadata:\n"
+            "  annotations: {}\n"
+            "  name: loki-operator.v6.0.16\n"
+            "spec:\n"
+            "  install:\n"
+            "    spec:\n"
+            "      deployments:\n"
+            "      - spec:\n"
+            "          template:\n"
+            "            spec:\n"
+            "              containers:\n"
+            "              - image: quay.io/openshift-logging/loki-operator:6.0.16\n"
+        )
+
+        read_call_count = [0]
+        file_contents = [package_yaml, image_refs_yaml, csv_content]
+
+        async def mock_read():
+            idx = read_call_count[0]
+            read_call_count[0] += 1
+            if idx < len(file_contents):
+                return file_contents[idx]
+            return ""
+
+        mock_file = mock_open.return_value.__aenter__.return_value
+        mock_file.read = mock_read
+        mock_file.write = AsyncMock()
+
+        mock_path_exists.side_effect = lambda path_self: "image-references" in str(path_self)
+        mock_path_glob.return_value = []
+
+        bundle_files = [
+            Path("/path/to/operator/dir/manifests/bundle/loki-operator.clusterserviceversion.yaml"),
+            Path("/path/to/operator/dir/manifests/bundle/image-references"),
+        ]
+        mock_iterdir.side_effect = lambda: iter(bundle_files)
+
+        mock_build_delivery_maps.return_value = ({}, {})
+        # _resolve_operands_from_db returns the ORIGINAL upstream spec from image-references
+        mock_resolve_operands.return_value = {
+            "loki-rhel9-operator": (
+                "quay.io/openshift-logging/loki-operator:0.1.0",
+                "registry.redhat.io/openshift-logging/loki-rhel9-operator@sha256:def456",
+                "loki-operator-container-6.0.16-1.el9",
+            ),
+        }
+
+        await self.rebaser._rebase_dir(metadata, operator_dir, bundle_dir, operator_build, input_release)
+
+        mock_resolve_operands.assert_called_once()
+
+        # Verify the art.yaml-modified tag was replaced with the SHA pullspec
+        write_calls = mock_file.write.call_args_list
+        csv_written = None
+        for call in write_calls:
+            written = call[0][0]
+            if "loki" in written or "sha256:def456" in written:
+                csv_written = written
+                break
+        self.assertIsNotNone(csv_written, "CSV content was not written")
+        self.assertIn("sha256:def456", csv_written)
+        self.assertNotIn("quay.io/openshift-logging/loki-operator:6.0.16", csv_written)
+        self.assertNotIn("quay.io/openshift-logging/loki-operator:0.1.0", csv_written)
+
+    @patch("pathlib.Path.iterdir")
     @patch("pathlib.Path.exists")
     @patch("pathlib.Path.glob")
     @patch("aiofiles.open")
