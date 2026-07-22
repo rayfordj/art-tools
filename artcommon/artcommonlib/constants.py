@@ -115,6 +115,8 @@ PRODUCT_BASE_IMAGE_KONFLUX_RELEASE_MAP = {
     "oadp": ("oadp-images-base-silent", "oadp-images-base"),
     "logging": ("logging-images-base-silent", "logging-images-base"),
     "openshift-logging": ("logging-images-base-silent", "logging-images-base"),
+    "acm": ("acm-images-base-silent", "acm-images-base"),
+    "mce": ("acm-images-base-silent", "acm-images-base"),
 }
 
 # Pre-release lifecycle (software_lifecycle.phase) — registry-ocp-art-base-ec-prod via ART-19498.
